@@ -290,31 +290,33 @@ async def cancel_conversation(update: Update, context: ContextTypes.DEFAULT_TYPE
 # ---------------------- BULK TEXT / FILE PARSER ----------------------
 
 async def handle_text_or_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """User ke text ya document ko scan karke bulk me quiz banana"""
+    """User ke text ya .txt document ko scan karke quiz banana"""
     raw_text = ""
 
     if update.message.document:
         doc = update.message.document
-        if doc.file_name and doc.file_name.endswith((".txt", ".text")):
+        if doc.file_name and doc.file_name.lower().endswith((".txt", ".text")):
             file = await doc.get_file()
             byte_content = await file.download_as_bytearray()
             raw_text = byte_content.decode("utf-8", errors="ignore")
         else:
             return
     elif update.message.text:
-        text = update.message.text
-        if "Q1" in text or "Q." in text or "Ans:" in text or "Answer:" in text:
-            raw_text = text
+        raw_text = update.message.text
 
-    if not raw_text:
+    if not raw_text or len(raw_text.strip()) < 10:
         return
 
+    # Parser chala kar dekhein
     questions = parse_questions_from_text(raw_text)
     if not questions:
         return
 
     user_id = update.effective_user.id
-    title = f"Quick Quiz ({len(questions)} Questions)"
+    # Quiz Title banayein (First question se ya general)
+    first_q_preview = questions[0]["question"].split("?")[0][:30].strip()
+    title = f"{first_q_preview}..." if len(questions) > 1 else questions[0]["question"][:35]
+
     quiz_id = await db.create_quiz(creator_id=user_id, title=title, timer=config.DEFAULT_QUESTION_TIMER)
 
     for q in questions:
@@ -327,10 +329,13 @@ async def handle_text_or_document(update: Update, context: ContextTypes.DEFAULT_
         )
 
     await update.message.reply_text(
-        f"⚡ **Bulk Import Successful!**\n\n"
-        f"Aapke text se **{len(questions)} Questions** extract karke naya quiz bana diya gaya hai!\n\n"
-        f"🆔 **Quiz ID:** `{quiz_id}`\n"
-        f"👉 Khelne ke liye dabayein: `/play_{quiz_id}`",
+        f"⚡ **Quiz Successfully Create Ho Gaya!**\n\n"
+        f"📖 **Title:** {title}\n"
+        f"🔢 **Total Questions:** {len(questions)}\n"
+        f"⏱️ **Timer:** {config.DEFAULT_QUESTION_TIMER}s\n"
+        f"🆔 **Quiz ID:** `{quiz_id}`\n\n"
+        f"Khelne ke liye click karein:\n"
+        f"👉 `/play_{quiz_id}`",
         parse_mode=ParseMode.MARKDOWN
     )
 
