@@ -2,6 +2,7 @@ import re
 from typing import List, Dict, Any
 
 CHECKMARK_PATTERNS = ["✅", "✔️", "✔", "☑️", "☑", "(sahi)", "(correct)", "[correct]", "*"]
+EXPLANATION_PREFIXES = ["ex:-", "ex:", "ex-", "exp:", "exp-", "explanation:", "vyakhya:", "व्याख्या:"]
 
 def clean_option_text(text: str) -> str:
     """Removes leading numbering like 1., A), (B) and trailing checkmarks"""
@@ -55,8 +56,20 @@ def parse_questions_from_text(raw_text: str) -> List[Dict[str, Any]]:
             # First line is Question
             q_text = re.sub(r'^(?:[Qq](?:uestion)?\s*\d*[\.\:]?|\d+[\.\)])\s*', '', lines[0]).strip()
             
-            # Remaining lines are options
+            # Remaining lines are options or explanation
             for idx, line in enumerate(lines[1:]):
+                # Check if this line is an explanation (Ex:-, Exp:, etc.)
+                line_lower = line.lower().strip()
+                is_explanation = any(line_lower.startswith(prefix) for prefix in EXPLANATION_PREFIXES)
+                
+                if is_explanation:
+                    # Extract explanation text after the prefix
+                    for prefix in EXPLANATION_PREFIXES:
+                        if line_lower.startswith(prefix):
+                            explanation = line[len(prefix):].strip()
+                            break
+                    continue
+                
                 is_correct = any(cm in line for cm in CHECKMARK_PATTERNS)
                 cleaned = clean_option_text(line)
                 if cleaned:
@@ -68,7 +81,7 @@ def parse_questions_from_text(raw_text: str) -> List[Dict[str, Any]]:
             # Format 2: Regex based parsing for Q/A/B/C/D / Ans: ...
             opt_pattern = re.compile(r'^(?:[A-Da-d0-9][\.\)]|\([A-Da-d0-9]\))\s*(.+)$')
             ans_pattern = re.compile(r'^(?:ans(?:wer)?|sahi\s*uttar|uttar)\s*[:=\-]?\s*([A-Da-d1-9])', re.IGNORECASE)
-            exp_pattern = re.compile(r'^(?:exp(?:lanation)?|vyakhya)\s*[:=\-]?\s*(.+)$', re.IGNORECASE)
+            exp_pattern = re.compile(r'^(?:ex(?:p(?:lanation)?)?|vyakhya|व्याख्या)\s*[:=\-]+\s*(.+)$', re.IGNORECASE)
 
             for line in lines:
                 ans_match = ans_pattern.match(line)
