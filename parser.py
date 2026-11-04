@@ -32,8 +32,8 @@ def parse_questions_from_text(raw_text: str) -> List[Dict[str, Any]]:
         Ans: C
         Exp: Explanation...
     """
-    # Normalize line endings
-    text = raw_text.replace('\r\n', '\n').replace('\r', '\n')
+    # Normalize unicode spaces & line endings
+    text = raw_text.replace('\u00a0', ' ').replace('\r\n', '\n').replace('\r', '\n')
     # Split by one or more blank lines
     blocks = re.split(r'\n\s*\n+', text.strip())
     questions = []
@@ -57,7 +57,6 @@ def parse_questions_from_text(raw_text: str) -> List[Dict[str, Any]]:
             
             # Remaining lines are options
             for idx, line in enumerate(lines[1:]):
-                # Is this line marked correct?
                 is_correct = any(cm in line for cm in CHECKMARK_PATTERNS)
                 cleaned = clean_option_text(line)
                 if cleaned:

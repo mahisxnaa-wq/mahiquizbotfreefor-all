@@ -177,6 +177,12 @@ async def newquiz_question(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if text.lower() == "/done":
         return await newquiz_finish(update, context)
 
+    # Check agar user ne pura question + options ya multiple questions paste kar diye
+    parsed = parse_questions_from_text(text)
+    if parsed:
+        context.user_data["questions"].extend(parsed)
+        return await newquiz_finish(update, context)
+
     context.user_data["current_question"] = text
     await update.message.reply_text(
         "Ab is question ke **Options** bhejiye (har option nayi line me):\n\n"
@@ -187,6 +193,25 @@ async def newquiz_question(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Chennai"
     )
     return OPTIONS_PROMPT
+
+
+async def newquiz_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Agar user /newquiz ke dauran seedha .txt file bhej de"""
+    doc = update.message.document
+    if doc.file_name and doc.file_name.lower().endswith((".txt", ".text")):
+        file = await doc.get_file()
+        byte_content = await file.download_as_bytearray()
+        raw_text = byte_content.decode("utf-8", errors="ignore")
+        parsed = parse_questions_from_text(raw_text)
+        if parsed:
+            context.user_data["questions"].extend(parsed)
+            return await newquiz_finish(update, context)
+        else:
+            await update.message.reply_text("❌ File me questions detect nahi huye. Format check karein.")
+            return QUESTION_PROMPT
+    else:
+        await update.message.reply_text("❌ Kripya sirf .txt file bhejiye ya `/cancel` likhein.")
+        return QUESTION_PROMPT
 
 
 async def newquiz_options(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -601,6 +626,7 @@ def main():
             TIMER: [MessageHandler(filters.TEXT & ~filters.COMMAND, newquiz_timer)],
             QUESTION_PROMPT: [
                 CommandHandler("done", newquiz_finish),
+                MessageHandler(filters.Document.ALL, newquiz_document),
                 MessageHandler(filters.TEXT & ~filters.COMMAND, newquiz_question)
             ],
             OPTIONS_PROMPT: [MessageHandler(filters.TEXT & ~filters.COMMAND, newquiz_options)],
