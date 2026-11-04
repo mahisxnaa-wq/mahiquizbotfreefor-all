@@ -300,25 +300,17 @@ async def newquiz_finish(update: Update, context: ContextTypes.DEFAULT_TYPE):
     title = context.user_data.get("title", "Untitled Quiz")
     timer = context.user_data.get("timer", config.DEFAULT_QUESTION_TIMER)
     user = update.effective_user
+    creator_name = user.first_name or user.username or "User"
 
     quiz_id = await db.create_quiz(
         creator_id=user.id,
         title=title,
         questions=questions,
         timer=timer,
-        creator_name=user.first_name or user.username or ""
+        creator_name=creator_name
     )
 
-    await update.message.reply_text(
-        f"🎉 **Quiz Create Ho Gaya!**\n\n"
-        f"📌 **Title:** {title}\n"
-        f"🔢 **Total Questions:** {len(questions)}\n"
-        f"⏱️ **Timer:** {timer}s per question\n"
-        f"🆔 **Quiz ID:** `{quiz_id}`\n\n"
-        f"Khelne ke liye:\n"
-        f"👉 `/play_{quiz_id}`",
-        parse_mode=ParseMode.MARKDOWN
-    )
+    await send_quiz_card(update.effective_chat.id, quiz_id, title, questions, timer, creator_name, context)
     context.user_data.clear()
     return ConversationHandler.END
 
@@ -367,14 +359,39 @@ async def handle_text_or_document(update: Update, context: ContextTypes.DEFAULT_
         creator_name=user.first_name or user.username or ""
     )
 
-    await update.message.reply_text(
-        f"⚡ **Quiz Create Ho Gaya!**\n\n"
-        f"📖 **Title:** {title}\n"
-        f"🔢 **Total Questions:** {len(questions)}\n"
-        f"⏱️ **Timer:** {config.DEFAULT_QUESTION_TIMER}s\n"
-        f"🆔 **Quiz ID:** `{quiz_id}`\n\n"
-        f"👉 `/play_{quiz_id}`",
-        parse_mode=ParseMode.MARKDOWN
+    await send_quiz_card(update.effective_chat.id, quiz_id, title, questions, config.DEFAULT_QUESTION_TIMER, user.first_name or user.username or "User", context)
+
+
+# ---------------------- QUIZ INFO CARD ----------------------
+
+async def send_quiz_card(chat_id, quiz_id, title, questions, timer, creator_name, context):
+    """Sundar Quiz Info Card with Start, Group, Share buttons"""
+    bot_username = (await context.bot.get_me()).username
+    total_q = len(questions) if isinstance(questions, list) else 0
+
+    card_text = (
+        f"📋 **Name:** 📚 {title}\n\n"
+        f"🔢  Questions: **{total_q}**\n"
+        f"⏱️  Timer: **{timer}s**\n"
+        f"🃏  Card Mode: 🗳  1 Card (Poll Only)\n"
+        f"🆔  ID: **{quiz_id}**\n"
+        f"💰  Type: **free**\n"
+        f"🐱  -ve: **0.00**\n"
+        f"👤  Creator: **{creator_name}** 💖\n"
+    )
+
+    keyboard = [
+        [InlineKeyboardButton("🎯 Start ▶️", callback_data=f"sq_{quiz_id}")],
+        [InlineKeyboardButton("🚀 Group ▶️", url=f"https://t.me/{bot_username}?startgroup=play_{quiz_id}")],
+        [InlineKeyboardButton("🔗 Share", switch_inline_query=f"play_{quiz_id}")],
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+
+    await context.bot.send_message(
+        chat_id=chat_id,
+        text=card_text,
+        parse_mode=ParseMode.MARKDOWN,
+        reply_markup=reply_markup
     )
 
 
