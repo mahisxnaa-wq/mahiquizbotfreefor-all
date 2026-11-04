@@ -11,8 +11,8 @@ BOT_TOKEN = os.getenv("BOT_TOKEN", "YOUR_BOT_TOKEN_HERE")
 # Admin IDs (apna Telegram user id yahan dalein, e.g. [123456789])
 ADMIN_IDS = [int(i.strip()) for i in os.getenv("ADMIN_IDS", "0").split(",") if i.strip().isdigit()]
 
-# Database File Path
-DB_NAME = os.getenv("DB_NAME", "quiz_bot.db")
+# MongoDB Atlas Connection URI
+MONGODB_URI = os.getenv("MONGODB_URI", "mongodb+srv://username:password@cluster0.xxxxx.mongodb.net/?retryWrites=true&w=majority")
 
 # Default Quiz Settings
 DEFAULT_QUESTION_TIMER = int(os.getenv("DEFAULT_QUESTION_TIMER", "20"))  # in seconds

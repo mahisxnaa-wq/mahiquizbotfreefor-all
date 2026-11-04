@@ -37,7 +37,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-db = Database(config.DB_NAME)
+db = Database()
 
 # States for /newquiz Conversation
 TITLE, QUESTION_PROMPT, OPTIONS_PROMPT, CORRECT_PROMPT, EXPLANATION_PROMPT, TIMER = range(6)
