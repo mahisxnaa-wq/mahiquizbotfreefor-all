@@ -92,12 +92,13 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = chat.id
     await db.register_user(user.id, user.username, user.first_name)
 
-    # Deep link check: /start play_QUIZID (jab Group button se aaye)
+    # Deep link check: /start play_QUIZID ya /start QUIZID
     if context.args and len(context.args) > 0:
-        arg = context.args[0]
-        if arg.startswith("play_"):
-            quiz_id = arg[5:]
-            if quiz_id:
+        raw_arg = context.args[0].split("@")[0].strip()
+        quiz_id = raw_arg[5:] if raw_arg.startswith("play_") else raw_arg
+        if quiz_id:
+            quiz = await db.get_quiz(quiz_id)
+            if quiz:
                 await start_quiz_session(quiz_id, chat_id, context)
                 return ConversationHandler.END
 
@@ -817,7 +818,7 @@ async def play_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text
     parts = text.split("_", 1)
     if len(parts) > 1 and parts[1].strip():
-        quiz_id = parts[1].strip()
+        quiz_id = parts[1].split("@")[0].strip()
         await start_quiz_session(quiz_id, update.effective_chat.id, context)
     else:
         await list_quizzes_command(update, context)
@@ -1232,34 +1233,147 @@ async def leaderboard_command(update: Update, context: ContextTypes.DEFAULT_TYPE
         await update.message.reply_text(msg, parse_mode=ParseMode.MARKDOWN)
 
 
+# ---------------------- OWNER BROADCAST COMMANDS ----------------------
+
+def is_real_owner(user_id: int) -> bool:
+    """Strictly checks if user is the real Bot Owner (MAHI 💖)"""
+    return user_id == config.OWNER_ID or user_id in config.ADMIN_IDS
+
+
 async def broadcast_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/broadcast - Owner Broadcast Help & Hub"""
     user_id = update.effective_user.id
-    if user_id not in config.ADMIN_IDS and config.ADMIN_IDS != [0]:
-        await update.message.reply_text("❌ Aap admin nahi hain.")
+    if not is_real_owner(user_id):
+        await update.message.reply_text("🚫 **Access Denied!**\n\nHawww! Yeh secret command sirf mela **Real Owner (MAHI 💖)** hi use kar sakti hai! Aap ise use nahi kar sakte ji. 🥺👑", parse_mode=ParseMode.MARKDOWN)
         return
 
-    msg_to_send = " ".join(context.args)
+    msg_to_send = " ".join(context.args).strip()
     if not msg_to_send:
-        await update.message.reply_text("Usage: `/broadcast Aapka Message`")
+        guide = (
+            "╭━━━━━ 📢 **OWNER BROADCAST HUB** ━━━━━╮\n"
+            f"  👑 **Mela Owner Control Panel** 🎀\n"
+            "╰━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╯\n\n"
+            "Aap 2 tarah se broadcast kar sakte ho ji:\n\n"
+            "🏰 **1. Sirf Saare Groups Me Bhejna Ho:**\n"
+            "`/broadcastgroup Aapka pyala message yahan`\n"
+            "*(Bot jin-jin sabhi groups me add hai, sabhi me ek sath jayega)*\n\n"
+            "👤 **2. Sirf Private (DM) Users Ko Bhejna Ho:**\n"
+            "`/broadcastprivate Aapka pyala message yahan`\n"
+            "*(Bot ke sabhi private chat users ko ek sath jayega)*\n\n"
+            "✨ *Example:*\n"
+            "`/broadcastgroup Aaj shaam 8 baje mega quiz contest hai!`"
+        )
+        await update.message.reply_text(guide, parse_mode=ParseMode.MARKDOWN)
         return
+
+    # Agar /broadcast ke aage direct message likha hai, toh private bhejo
+    await broadcast_private_command(update, context)
+
+
+async def broadcast_group_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/broadcastgroup <msg> - Sirf saare groups me message bhejna"""
+    user_id = update.effective_user.id
+    if not is_real_owner(user_id):
+        await update.message.reply_text("🚫 **Access Denied!**\n\nHawww! Yeh secret command sirf mela **Real Owner (MAHI 💖)** hi use kar sakti hai! Aap ise use nahi kar sakte ji. 🥺👑", parse_mode=ParseMode.MARKDOWN)
+        return
+
+    msg_to_send = " ".join(context.args).strip()
+    if not msg_to_send:
+        await update.message.reply_text(
+            "Arey re! Message toh likho na sath me 🥺:\n"
+            "Usage: `/broadcastgroup Aapka pyala message yahan`",
+            parse_mode=ParseMode.MARKDOWN
+        )
+        return
+
+    status_msg = await update.message.reply_text("📢 **Saare groups me broadcast bhejna shuru kar rahi hoon...** ⏳")
+
+    group_ids = await db.get_all_group_ids()
+    if not group_ids:
+        await status_msg.edit_text("Arey re! Abhi tak koi group list me nahi mila 🥺")
+        return
+
+    success_count = 0
+    fail_count = 0
+
+    for gid in group_ids:
+        try:
+            await context.bot.send_message(
+                chat_id=gid,
+                text=msg_to_send,
+                parse_mode=ParseMode.MARKDOWN
+            )
+            success_count += 1
+            await asyncio.sleep(0.05)  # Telegram rate-limit prevention
+        except Exception:
+            fail_count += 1
+
+    await status_msg.edit_text(
+        f"╭━━━━━ 📢 **GROUP BROADCAST DONE** ━━━━━╮\n"
+        f"  🎉 **Masti Se Message Pahunch Gaya!** 🧸\n"
+        f"╰━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╯\n\n"
+        f"✅ **Sent Successfully:** `{success_count}` Groups\n"
+        f"⚠️ **Failed / Left:** `{fail_count}` Groups\n"
+        f"🏰 **Total Attempted:** `{len(group_ids)}` Groups 🍼✨",
+        parse_mode=ParseMode.MARKDOWN
+    )
+
+
+async def broadcast_private_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/broadcastprivate <msg> - Sirf saare private users ko message bhejna"""
+    user_id = update.effective_user.id
+    if not is_real_owner(user_id):
+        await update.message.reply_text("🚫 **Access Denied!**\n\nHawww! Yeh secret command sirf mela **Real Owner (MAHI 💖)** hi use kar sakti hai! Aap ise use nahi kar sakte ji. 🥺👑", parse_mode=ParseMode.MARKDOWN)
+        return
+
+    msg_to_send = " ".join(context.args).strip()
+    if not msg_to_send:
+        await update.message.reply_text(
+            "Arey re! Message toh likho na sath me 🥺:\n"
+            "Usage: `/broadcastprivate Aapka pyala message yahan`",
+            parse_mode=ParseMode.MARKDOWN
+        )
+        return
+
+    status_msg = await update.message.reply_text("📢 **Saare private users ko broadcast bhejna shuru kar rahi hoon...** ⏳")
 
     users = await db.get_all_users()
-    count = 0
+    if not users:
+        await status_msg.edit_text("Arey re! Abhi tak koi registered user nahi mila 🥺")
+        return
+
+    success_count = 0
+    fail_count = 0
+
     for uid in users:
         try:
-            await context.bot.send_message(chat_id=uid, text=msg_to_send, parse_mode=ParseMode.MARKDOWN)
-            count += 1
-            await asyncio.sleep(0.05)
+            await context.bot.send_message(
+                chat_id=uid,
+                text=msg_to_send,
+                parse_mode=ParseMode.MARKDOWN
+            )
+            success_count += 1
+            await asyncio.sleep(0.05)  # Telegram rate-limit prevention
         except Exception:
-            pass
+            fail_count += 1
 
-    await update.message.reply_text(f"✅ Broadcast {count} users ko bhej diya!")
+    await status_msg.edit_text(
+        f"╭━━━━━ 📢 **PRIVATE BROADCAST DONE** ━━━━━╮\n"
+        f"  🎉 **Masti Se Message Pahunch Gaya!** 🧸\n"
+        f"╰━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╯\n\n"
+        f"✅ **Sent Successfully:** `{success_count}` Users\n"
+        f"⚠️ **Blocked / Inactive:** `{fail_count}` Users\n"
+        f"👤 **Total Users:** `{len(users)}` Users 🍼✨",
+        parse_mode=ParseMode.MARKDOWN
+    )
 
 
 # ---------------------- GROUP TRACKING & OWNER ALERT ----------------------
 
+recently_notified_groups = set()
+
 async def on_my_chat_member(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Jab bot kisi group me add ya promote ho"""
+    """Jab bot kisi group me add ya promote ho (Group me kuch nahi bolega, sirf Owner ko batayega)"""
     result = update.my_chat_member
     if not result:
         return
@@ -1272,7 +1386,6 @@ async def on_my_chat_member(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if chat.type in ["group", "supergroup"]:
         if old_status in ["left", "kicked"] and new_status in ["member", "administrator"]:
             await notify_owner_about_new_group(chat, from_user, context)
-            await send_group_welcome(chat.id, context)
 
 
 async def on_new_chat_members(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1286,19 +1399,22 @@ async def on_new_chat_members(update: Update, context: ContextTypes.DEFAULT_TYPE
     for member in msg.new_chat_members:
         if member.id == bot_id:
             await notify_owner_about_new_group(chat, msg.from_user, context)
-            await send_group_welcome(chat.id, context)
             break
 
 
 async def notify_owner_about_new_group(chat, from_user, context):
-    """Owner ko naye group ki poori details bhejna"""
+    """Owner ko naye group ki poori details bhejna (Group me koi message nahi jayega)"""
+    if chat.id in recently_notified_groups:
+        return
+    recently_notified_groups.add(chat.id)
+
     try:
         try:
             members_count = await chat.get_member_count()
         except Exception:
             members_count = "N/A"
 
-        group_link = f"@{chat.username}" if chat.username else "Private Group"
+        group_link = f"@{chat.username}" if chat.username else "Private Group (No Link)"
         if not chat.username:
             try:
                 invite = await chat.export_invite_link()
@@ -1347,31 +1463,6 @@ async def notify_owner_about_new_group(chat, from_user, context):
                 logger.error(f"Could not send group alert to admin {admin_id}: {e}")
     except Exception as e:
         logger.error(f"Error in notify_owner_about_new_group: {e}")
-
-
-async def send_group_welcome(chat_id: int, context: ContextTypes.DEFAULT_TYPE):
-    """Group me sundar cute welcome message bhejna"""
-    try:
-        welcome_text = (
-            f"╭━━━━━━━ ∙ʚ♡ɞ∙ ━━━━━━━╮\n"
-            f"   🧸 **NAMASTE DOSTO!** 🎀🍼\n"
-            f"╰━━━━━━━ ∙ʚ♡ɞ∙ ━━━━━━━╯\n\n"
-            f"Main hoon aapki pyali **MAHI QUIZ BOT**! ✨🥰\n"
-            f"Mujhe is pyale se group me add karne ke liye thank you so much! 💖\n\n"
-            f"🎯 **Yahan Aap Sab Quiz Contest Khel Sakte Ho:**\n"
-            f"• `/play_QUIZID` - Koi bhi quiz shuru karo 🎮\n"
-            f"• `/quizzes` - Available quizzes ki list dekho 📋\n"
-            f"• `/leaderboard` - Top champions dekho 🏆\n\n"
-            f"*(Naya quiz banane ke liye mujhe Private (DM) me message karo na)* 🍼\n\n"
-            f"Chalo ab khoob saari masti shuru karte hain! 🥳🎉"
-        )
-        await context.bot.send_message(
-            chat_id=chat_id,
-            text=welcome_text,
-            parse_mode=ParseMode.MARKDOWN
-        )
-    except Exception as e:
-        logger.error(f"Could not send welcome message to group {chat_id}: {e}")
 
 
 async def list_groups_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1448,7 +1539,9 @@ def main():
     app.add_handler(CommandHandler("help", help_command))
     app.add_handler(CommandHandler("quizzes", list_quizzes_command))
     app.add_handler(CommandHandler("leaderboard", leaderboard_command))
-    app.add_handler(CommandHandler("broadcast", broadcast_command))
+    app.add_handler(CommandHandler(["broadcast", "boardcast"], broadcast_command))
+    app.add_handler(CommandHandler(["broadcastgroup", "broadcastgroups", "boardcastgroup", "bg"], broadcast_group_command))
+    app.add_handler(CommandHandler(["broadcastprivate", "boardcastprivate", "bp"], broadcast_private_command))
     app.add_handler(CommandHandler("stop", stop_command))
     app.add_handler(CommandHandler("fast", fast_command))
     app.add_handler(CommandHandler("slow", slow_command))
