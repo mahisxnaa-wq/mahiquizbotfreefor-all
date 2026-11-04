@@ -523,18 +523,7 @@ async def send_next_question(chat_id: int, context: ContextTypes.DEFAULT_TYPE):
     correct_idx = q.get("correct_option_id") if "correct_option_id" in q else q.get("correct_option_index", 0)
     explanation = q.get("explanation", "")
 
-    # Image Card (with fallback)
-    try:
-        img_bio = create_question_image(
-            question_text=f"Q{idx+1}. {q_text}",
-            options=options,
-            quiz_title=session["title"]
-        )
-        await context.bot.send_photo(chat_id=chat_id, photo=img_bio)
-    except Exception as e:
-        logger.warning(f"Image generation failed: {e}")
-
-    # Telegram Quiz Poll
+    # Native Telegram Quiz Poll only (no image card)
     poll_question = f"Q{idx+1}: {q_text[:250]}"
     poll_options = options[:10]
 
