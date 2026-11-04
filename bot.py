@@ -1,6 +1,9 @@
 import logging
 import asyncio
 import io
+import os
+import threading
+from http.server import HTTPServer, BaseHTTPRequestHandler
 from typing import Dict, Any
 
 from telegram import (
@@ -9,7 +12,7 @@ from telegram import (
     InlineKeyboardMarkup,
     Poll,
 )
-from telegram.constants import ParseMode, ChatType
+from telegram.constants import ParseMode
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -41,10 +44,32 @@ TITLE, TIMER, QUESTION_PROMPT, OPTIONS_PROMPT, CORRECT_PROMPT, EXPLANATION_PROMP
 active_sessions: Dict[int, Dict[str, Any]] = {}
 
 
+# ---------------------- RENDER HEALTH-CHECK SERVER ----------------------
+
+class HealthCheckHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header("Content-type", "text/plain")
+        self.end_headers()
+        self.wfile.write(b"Quiz Bot is alive and running on Render!")
+
+    def log_message(self, format, *args):
+        # Console me logs flood na hon
+        return
+
+def run_health_server():
+    """Render Web Service ke liye background port listener"""
+    port = int(os.environ.get("PORT", 8080))
+    server = HTTPServer(("0.0.0.0", port), HealthCheckHandler)
+    logger.info(f"Health check web server started on port {port}")
+    server.serve_forever()
+
+
+# ---------------------- COMMAND HANDLERS ----------------------
+
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Start command handler"""
     user = update.effective_user
-    chat = update.effective_chat
 
     await db.register_user(user.id, user.username, user.first_name)
 
@@ -64,9 +89,9 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"👋 **Namaste {user.first_name}!**\n\n"
         "Main aapka **Telegram Quiz Bot** hoon! 🧠\n\n"
         "✨ **Aap yahan kya-kya kar sakte hain:**\n"
-        "• Naye quizzes create kar sakte hain (`/newquiz`)\n"
-        "• Text format ya `.txt` file bhejkar ek click me quiz bana sakte hain\n"
-        "• Telegram Groups me dosto ke sath quiz contest chala sakte hain\n"
+        "• Koi bhi user yahan naya quiz bana sakta hai (`/newquiz`)\n"
+        "• Text ya `.txt` file bhejkar ek click me quiz import kar sakte hain\n"
+        "• Telegram Groups me quiz contest chala sakte hain\n"
         "• Real-time leaderboard aur rankings dekh sakte hain\n\n"
         "Neeche diye gaye buttons se shuru karein 👇"
     )
@@ -82,7 +107,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "📖 **Bot Commands Guide:**\n\n"
         "• `/start` - Bot ko shuru karein aur main menu dekhein\n"
         "• `/quizzes` - Available quizzes ki list dekhein\n"
-        "• `/newquiz` - Step-by-step naya quiz banayein\n"
+        "• `/newquiz` - Naya quiz banayein (Sabke liye open hai)\n"
         "• `/leaderboard` - Top rankers ki list dekhein\n"
         "• `/cancel` - Chalu process cancel karein\n\n"
         "📝 **Bulk Questions Add Karne Ka Tarika:**\n"
@@ -154,7 +179,7 @@ async def newquiz_question(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     context.user_data["current_question"] = text
     await update.message.reply_text(
-        "Ab is question ke **4 Options** bhejiye (har option nayi line me):\n\n"
+        "Ab is question ke **Options** bhejiye (har option nayi line me):\n\n"
         "Example:\n"
         "Mumbai\n"
         "Kolkata\n"
@@ -172,7 +197,6 @@ async def newquiz_options(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     context.user_data["current_options"] = raw_lines[:10]
 
-    # Show numbers to pick correct option
     opts_display = "\n".join([f"{i+1}) {opt}" for i, opt in enumerate(context.user_data["current_options"])])
     await update.message.reply_text(
         f"Options note ho gaye:\n{opts_display}\n\n"
@@ -206,7 +230,6 @@ async def newquiz_explanation(update: Update, context: ContextTypes.DEFAULT_TYPE
     text = update.message.text.strip()
     explanation = "" if text.lower() == "/skip" else text
 
-    # Question save karein list me
     q_data = {
         "question": context.user_data["current_question"],
         "options": context.user_data["current_options"],
@@ -277,10 +300,9 @@ async def handle_text_or_document(update: Update, context: ContextTypes.DEFAULT_
             byte_content = await file.download_as_bytearray()
             raw_text = byte_content.decode("utf-8", errors="ignore")
         else:
-            return  # Non-text doc ignore karein
+            return
     elif update.message.text:
         text = update.message.text
-        # Agar Q1 ya Question pattern match ho
         if "Q1" in text or "Q." in text or "Ans:" in text or "Answer:" in text:
             raw_text = text
 
@@ -306,7 +328,7 @@ async def handle_text_or_document(update: Update, context: ContextTypes.DEFAULT_
 
     await update.message.reply_text(
         f"⚡ **Bulk Import Successful!**\n\n"
-        f"Humne aapke text se **{len(questions)} Questions** extract karke naya quiz bana diya hai!\n\n"
+        f"Aapke text se **{len(questions)} Questions** extract karke naya quiz bana diya gaya hai!\n\n"
         f"🆔 **Quiz ID:** `{quiz_id}`\n"
         f"👉 Khelne ke liye dabayein: `/play_{quiz_id}`",
         parse_mode=ParseMode.MARKDOWN
@@ -316,7 +338,6 @@ async def handle_text_or_document(update: Update, context: ContextTypes.DEFAULT_
 # ---------------------- PLAY QUIZ / LIVE ENGINE ----------------------
 
 async def list_quizzes_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Available quizzes list show karna"""
     quizzes = await db.get_all_quizzes(limit=10)
     if not quizzes:
         msg = "Abhi koi quiz available nahi hai. Aap `/newquiz` se pehla quiz banayein!"
@@ -345,7 +366,6 @@ async def list_quizzes_command(update: Update, context: ContextTypes.DEFAULT_TYP
 
 
 async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Buttons ke click ko handle karna"""
     query = update.callback_query
     await query.answer()
 
@@ -354,7 +374,7 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
         await list_quizzes_command(update, context)
     elif data == "create_quiz_info":
         await query.message.reply_text(
-            "➕ Naya quiz banane ke liye `/newquiz` command ka upayog karein, ya directly questions ka text paste karein!"
+            "➕ Naya quiz banane ke liye `/newquiz` command bhejiye, ya directly text paste karein!"
         )
     elif data == "show_leaderboard":
         await leaderboard_command(update, context)
@@ -366,7 +386,6 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
 
 
 async def play_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Direct `/play_123` command se quiz shuru karna"""
     text = update.message.text
     parts = text.split("_")
     if len(parts) > 1 and parts[1].isdigit():
@@ -377,7 +396,6 @@ async def play_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def start_quiz_session(quiz_id: int, chat_id: int, context: ContextTypes.DEFAULT_TYPE):
-    """Quiz session initialize karna aur questions bhejna"""
     quiz = await db.get_quiz(quiz_id)
     questions = await db.get_quiz_questions(quiz_id)
 
@@ -385,14 +403,13 @@ async def start_quiz_session(quiz_id: int, chat_id: int, context: ContextTypes.D
         await context.bot.send_message(chat_id=chat_id, text="❌ Yeh quiz khali hai ya nahi mila.")
         return
 
-    # Session state
     active_sessions[chat_id] = {
         "quiz_id": quiz_id,
         "title": quiz["title"],
         "timer": quiz["timer_seconds"],
         "questions": questions,
         "current_index": 0,
-        "scores": {},  # user_id -> score
+        "scores": {},
         "active_poll_id": None,
     }
 
@@ -412,7 +429,6 @@ async def start_quiz_session(quiz_id: int, chat_id: int, context: ContextTypes.D
 
 
 async def send_next_question(chat_id: int, context: ContextTypes.DEFAULT_TYPE):
-    """Agla question Telegram Poll ki tarah bhejna"""
     session = active_sessions.get(chat_id)
     if not session:
         return
@@ -421,14 +437,13 @@ async def send_next_question(chat_id: int, context: ContextTypes.DEFAULT_TYPE):
     questions = session["questions"]
 
     if idx >= len(questions):
-        # Quiz khatam ho gaya
         await finish_quiz_session(chat_id, context)
         return
 
     q = questions[idx]
     timer = session["timer"]
 
-    # 1. Option: Image card generate karke bhejna (Pillow)
+    # Image Card Generation (with fallback)
     try:
         img_bio = create_question_image(
             question_text=f"Q{idx+1}. {q['question_text']}",
@@ -439,7 +454,7 @@ async def send_next_question(chat_id: int, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logger.warning(f"Image generation failed: {e}")
 
-    # 2. Native Telegram Quiz Poll bhejna
+    # Native Telegram Quiz Poll
     poll_msg = await context.bot.send_poll(
         chat_id=chat_id,
         question=f"Q{idx+1}: {q['question_text'][:250]}",
@@ -454,7 +469,7 @@ async def send_next_question(chat_id: int, context: ContextTypes.DEFAULT_TYPE):
     session["active_poll_id"] = poll_msg.poll.id
     session["current_index"] += 1
 
-    # Timer wait karke next question bhejenge
+    # Schedule next question
     context.job_queue.run_once(
         quiz_timer_callback,
         when=timer + 2,
@@ -464,18 +479,15 @@ async def send_next_question(chat_id: int, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def quiz_timer_callback(context: ContextTypes.DEFAULT_TYPE):
-    """Timer khatam hone par agla question trigger karna"""
     chat_id = context.job.chat_id
     await send_next_question(chat_id, context)
 
 
 async def handle_poll_answer(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """User ke poll answer dene par score track karna"""
     answer = update.poll_answer
     user = answer.user
     selected_option = answer.option_ids[0] if answer.option_ids else None
 
-    # Find the active session that matches this poll
     for chat_id, session in active_sessions.items():
         if session.get("active_poll_id") == answer.poll_id:
             curr_idx = session["current_index"] - 1
@@ -483,13 +495,11 @@ async def handle_poll_answer(update: Update, context: ContextTypes.DEFAULT_TYPE)
                 correct_idx = session["questions"][curr_idx]["correct_option_index"]
                 if selected_option == correct_idx:
                     session["scores"][user.id] = session["scores"].get(user.id, 0) + 1
-                    # Save user info
                     await db.register_user(user.id, user.username, user.first_name)
             break
 
 
 async def finish_quiz_session(chat_id: int, context: ContextTypes.DEFAULT_TYPE):
-    """Quiz complete hone par leaderboard display karna"""
     session = active_sessions.pop(chat_id, None)
     if not session:
         return
@@ -498,11 +508,9 @@ async def finish_quiz_session(chat_id: int, context: ContextTypes.DEFAULT_TYPE):
     quiz_id = session["quiz_id"]
     total_q = len(session["questions"])
 
-    # DB me save karein
     for uid, sc in scores.items():
         await db.record_score(quiz_id, chat_id, uid, sc, total_q)
 
-    # Sort scores
     sorted_scores = sorted(scores.items(), key=lambda x: x[1], reverse=True)
 
     result_text = f"🏁 **Quiz Samapt (Completed)!**\n\n📖 **{session['title']}**\n\n🏆 **Leaderboard:**\n"
@@ -520,7 +528,6 @@ async def finish_quiz_session(chat_id: int, context: ContextTypes.DEFAULT_TYPE):
 # ---------------------- LEADERBOARD & ADMIN ----------------------
 
 async def leaderboard_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Overall Leaderboard dekhna"""
     leaders = await db.get_leaderboard(limit=10)
     if not leaders:
         msg = "🏆 Abhi tak koi score record nahi hua hai."
@@ -539,7 +546,6 @@ async def leaderboard_command(update: Update, context: ContextTypes.DEFAULT_TYPE
 
 
 async def broadcast_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Admin broadcast command (`/broadcast message`)"""
     user_id = update.effective_user.id
     if user_id not in config.ADMIN_IDS and config.ADMIN_IDS != [0]:
         await update.message.reply_text("❌ Aap admin nahi hain.")
@@ -556,26 +562,31 @@ async def broadcast_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         try:
             await context.bot.send_message(chat_id=uid, text=msg_to_send, parse_mode=ParseMode.MARKDOWN)
             count += 1
-            await asyncio.sleep(0.05)  # Telegram rate-limit prevention
+            await asyncio.sleep(0.05)
         except Exception:
             pass
 
     await update.message.reply_text(f"✅ Broadcast {count} users ko bhej diya gaya hai!")
 
 
-# ---------------------- MAIN ENTRY POINT ----------------------
+# ---------------------- STARTUP HOOK & MAIN ----------------------
+
+async def post_init(application: Application):
+    """Event Loop ke andar database initialize karna (Render fix)"""
+    await db.init_db()
+    logger.info("Database initialized successfully.")
+
 
 def main():
-    """Bot application start karna"""
     if config.BOT_TOKEN == "YOUR_BOT_TOKEN_HERE" or not config.BOT_TOKEN:
-        print("❌ ERROR: config.py me apna Telegram BOT_TOKEN dalein!")
+        print("❌ ERROR: BOT_TOKEN configure nahi hai! Render ke Environment Variables me daalein.")
         return
 
-    # Database initialize
-    asyncio.get_event_loop().run_until_complete(db.init_db())
+    # 1. Render Health Check server background thread me start karein
+    threading.Thread(target=run_health_server, daemon=True).start()
 
-    # Build Application
-    app = Application.builder().token(config.BOT_TOKEN).build()
+    # 2. Telegram Application Builder with post_init
+    app = Application.builder().token(config.BOT_TOKEN).post_init(post_init).build()
 
     # Conversation Handler for /newquiz
     conv_handler = ConversationHandler(
@@ -604,17 +615,13 @@ def main():
     app.add_handler(CommandHandler("broadcast", broadcast_command))
     app.add_handler(conv_handler)
 
-    # Dynamic /play_123 pattern
     app.add_handler(MessageHandler(filters.Regex(r"^/play(_\d+)?$"), play_command))
-
-    # Bulk text or document parser
     app.add_handler(MessageHandler(filters.Document.ALL | (filters.TEXT & ~filters.COMMAND), handle_text_or_document))
 
-    # Callbacks and Poll answers
     app.add_handler(CallbackQueryHandler(handle_callback_query))
     app.add_handler(PollAnswerHandler(handle_poll_answer))
 
-    print("🤖 Telegram Quiz Bot start ho raha hai...")
+    print("🤖 Telegram Quiz Bot successfully started on Render!")
     app.run_polling()
 
 
