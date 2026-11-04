@@ -153,6 +153,19 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ---------------------- STEP-BY-STEP QUIZ CREATOR ----------------------
 
 async def newquiz_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat = update.effective_chat
+    if chat.type != "private":
+        bot_username = (await context.bot.get_me()).username
+        keyboard = [
+            [InlineKeyboardButton("🍼 Naya Quiz Banayein (Private Me) 🎀", url=f"https://t.me/{bot_username}?start=newquiz")]
+        ]
+        await update.message.reply_text(
+            "Arey re! 🥺 Quiz creation group me nahi hota ji!\n\n"
+            "Naya quiz banane ke liye mujhe **Private (DM) me message karo na**! 🧸💖",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+        return ConversationHandler.END
+
     context.user_data.clear()
     context.user_data["questions"] = []
 
@@ -345,7 +358,11 @@ async def cancel_conversation(update: Update, context: ContextTypes.DEFAULT_TYPE
 # ---------------------- BULK TEXT / FILE PARSER ----------------------
 
 async def handle_text_or_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """User ke text ya .txt file se directly quiz banana (bina /newquiz ke)"""
+    """User ke text ya .txt file se directly quiz banana (sirf Private chat me!)"""
+    # Group me galti se text/file aane par quiz nahi banega
+    if update.effective_chat.type != "private":
+        return
+
     raw_text = ""
 
     if update.message.document:
@@ -419,7 +436,18 @@ async def send_quiz_card(chat_id, quiz_id, title, questions, timer, creator_name
 # ---------------------- QUIZ EDIT SYSTEM ----------------------
 
 async def edit_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """/edit QUIZID - Quiz edit menu open karna"""
+    """/edit QUIZID - Quiz edit menu open karna (sirf Private chat me)"""
+    if update.effective_chat.type != "private":
+        bot_username = (await context.bot.get_me()).username
+        quiz_id = context.args[0].strip() if context.args else ""
+        link = f"https://t.me/{bot_username}?start=edit_{quiz_id}" if quiz_id else f"https://t.me/{bot_username}"
+        keyboard = [[InlineKeyboardButton("✏️ Private Me Edit Karein 🎀", url=link)]]
+        await update.message.reply_text(
+            "Arey re! 🥺 Quiz edit group me nahi karte ji! Mujhe **Private (DM) me /edit bhejo na**! 🧸💖",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+        return ConversationHandler.END
+
     if not context.args or not context.args[0].strip():
         await update.message.reply_text("Usage: `/edit QUIZ_ID`", parse_mode=ParseMode.MARKDOWN)
         return ConversationHandler.END
