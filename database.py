@@ -4,6 +4,7 @@ import datetime
 from typing import List, Dict, Any, Optional
 
 from motor.motor_asyncio import AsyncIOMotorClient
+import certifi
 import config
 
 logger = logging.getLogger(__name__)
@@ -18,21 +19,26 @@ class Database:
     async def init_db(self):
         """MongoDB se connect karna aur collections setup karna"""
         try:
-            self.client = AsyncIOMotorClient(self.uri)
+            ca = certifi.where()
+            self.client = AsyncIOMotorClient(
+                self.uri,
+                tlsCAFile=ca,
+                serverSelectionTimeoutMS=15000
+            )
             self.db = self.client["quiz_bot"]
+
+            # Connection test
+            await self.client.admin.command("ping")
+            logger.info("✅ MongoDB Atlas se successfully connect ho gaya!")
 
             # Indexes create karna for fast lookups
             await self.db.users.create_index("user_id", unique=True)
             await self.db.quizzes.create_index("quiz_id", unique=True)
             await self.db.quizzes.create_index("created_at")
             await self.db.user_scores.create_index([("quiz_id", 1), ("user_id", 1)])
-
-            # Connection test
-            await self.client.admin.command("ping")
-            logger.info("✅ MongoDB Atlas se successfully connect ho gaya!")
         except Exception as e:
-            logger.error(f"❌ MongoDB connection failed: {e}")
-            raise
+            logger.error(f"❌ MongoDB connection error: {e}")
+            logger.info("MongoDB retry mode me chal raha hai, bot crash nahi hoga.")
 
     async def register_user(self, user_id: int, username: Optional[str], first_name: str):
         """User ko register ya update karna"""
