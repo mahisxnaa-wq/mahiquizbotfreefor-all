@@ -23,6 +23,7 @@ from telegram.ext import (
     ContextTypes,
     filters,
 )
+from telegram.request import HTTPXRequest
 
 import config
 from database import Database
@@ -642,8 +643,14 @@ def main():
     # Render Health Check
     threading.Thread(target=run_health_server, daemon=True).start()
 
-    # Build Application
-    app = Application.builder().token(config.BOT_TOKEN).post_init(post_init).build()
+    # Build Application with increased timeouts for Render free tier
+    request = HTTPXRequest(
+        connect_timeout=20.0,
+        read_timeout=40.0,
+        write_timeout=40.0,
+        pool_timeout=20.0,
+    )
+    app = Application.builder().token(config.BOT_TOKEN).request(request).post_init(post_init).build()
 
     # /newquiz Conversation Handler
     conv_handler = ConversationHandler(
