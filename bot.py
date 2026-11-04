@@ -39,7 +39,7 @@ logger = logging.getLogger(__name__)
 db = Database(config.DB_NAME)
 
 # States for /newquiz Conversation
-TITLE, TIMER, QUESTION_PROMPT, OPTIONS_PROMPT, CORRECT_PROMPT, EXPLANATION_PROMPT = range(6)
+TITLE, QUESTION_PROMPT, OPTIONS_PROMPT, CORRECT_PROMPT, EXPLANATION_PROMPT, TIMER = range(6)
 
 # In-memory tracking of active quiz sessions: chat_id -> SessionData
 active_sessions: Dict[int, Dict[str, Any]] = {}
@@ -68,7 +68,17 @@ def run_health_server():
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
+    chat_id = update.effective_chat.id
     await db.register_user(user.id, user.username, user.first_name)
+
+    # Deep link check: /start play_QUIZID (jab Group button se aaye)
+    if context.args and len(context.args) > 0:
+        arg = context.args[0]
+        if arg.startswith("play_"):
+            quiz_id = arg[5:]
+            if quiz_id:
+                await start_quiz_session(quiz_id, chat_id, context)
+                return
 
     keyboard = [
         [
@@ -153,22 +163,8 @@ async def newquiz_title(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text(
         f"✅ Title: **{title}**\n\n"
-        "Har question ke liye kitna **Timer (Seconds)** rakhna chahte hain?\n"
-        "(Recommended: 15, 20, 30, ya 45)",
-        parse_mode=ParseMode.MARKDOWN
-    )
-    return TIMER
-
-
-async def newquiz_timer(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = update.message.text.strip()
-    timer = int(text) if text.isdigit() and 10 <= int(text) <= 300 else config.DEFAULT_QUESTION_TIMER
-    context.user_data["timer"] = timer
-
-    await update.message.reply_text(
-        f"⏱️ Timer set ho gaya: **{timer} seconds**\n\n"
         "Ab aap questions bhej sakte hain:\n\n"
-        "**Option 1:** Ek-ek question bhejiye (bot aapko guide karega)\n"
+        "**Option 1:** Ek-ek question bhejiye (bot guide karega)\n"
         "**Option 2:** Saare questions ek sath text me paste kar dijiye (✅ tick ya Ans: C format)\n"
         "**Option 3:** `.txt` file bhej dijiye\n\n"
         "*(Jab complete ho jaye toh `/done` dabayein)*",
@@ -297,8 +293,24 @@ async def newquiz_finish(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ Koi question nahi mila. Quiz cancel ho gaya.")
         return ConversationHandler.END
 
+    # Timer pucho last me
+    await update.message.reply_text(
+        f"✅ **{len(questions)} Questions add ho gaye!**\n\n"
+        "Ab last me batayein — har question ke liye kitna **Timer (Seconds)** rakhna chahte hain?\n"
+        "(Recommended: 15, 20, 30, ya 45)",
+        parse_mode=ParseMode.MARKDOWN
+    )
+    return TIMER
+
+
+async def newquiz_timer(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Timer set karke quiz save karna (last step)"""
+    text = update.message.text.strip()
+    timer = int(text) if text.isdigit() and 10 <= int(text) <= 300 else config.DEFAULT_QUESTION_TIMER
+    context.user_data["timer"] = timer
+
+    questions = context.user_data.get("questions", [])
     title = context.user_data.get("title", "Untitled Quiz")
-    timer = context.user_data.get("timer", config.DEFAULT_QUESTION_TIMER)
     user = update.effective_user
     creator_name = user.first_name or user.username or "User"
 
@@ -674,7 +686,6 @@ def main():
         entry_points=[CommandHandler("newquiz", newquiz_start)],
         states={
             TITLE: [MessageHandler(filters.TEXT & ~filters.COMMAND, newquiz_title)],
-            TIMER: [MessageHandler(filters.TEXT & ~filters.COMMAND, newquiz_timer)],
             QUESTION_PROMPT: [
                 CommandHandler("done", newquiz_finish),
                 MessageHandler(filters.Document.ALL, newquiz_document),
@@ -686,6 +697,7 @@ def main():
                 CommandHandler("skip", newquiz_explanation),
                 MessageHandler(filters.TEXT & ~filters.COMMAND, newquiz_explanation),
             ],
+            TIMER: [MessageHandler(filters.TEXT & ~filters.COMMAND, newquiz_timer)],
         },
         fallbacks=[CommandHandler("cancel", cancel_conversation)],
     )
