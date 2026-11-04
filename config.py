@@ -1,13 +1,20 @@
 import os
+from dotenv import load_dotenv
 
-# Telegram Bot Token (BotFather se milta hai)
-BOT_TOKEN = os.getenv("BOT_TOKEN", "")
+# .env file load karein
+load_dotenv()
 
-# Owner ka Telegram User ID (Numeric ID, jaise 123456789)
-OWNER_ID = int(os.getenv("OWNER_ID", "0"))
+# Telegram Bot Configuration
+# Yahan apna @BotFather se mila hua BOT TOKEN daalein
+BOT_TOKEN = os.getenv("BOT_TOKEN", "YOUR_BOT_TOKEN_HERE")
 
-# Render Port (Free tier deployment ke liye)
-PORT = int(os.getenv("PORT", 8080))
+# Admin IDs (apna Telegram user id yahan dalein, e.g. [123456789])
+ADMIN_IDS = [int(i.strip()) for i in os.getenv("ADMIN_IDS", "0").split(",") if i.strip().isdigit()]
 
-# Database file ka naam
-DB_NAME = "quiz_bot.db"
+# Database File Path
+DB_NAME = os.getenv("DB_NAME", "quiz_bot.db")
+
+# Default Quiz Settings
+DEFAULT_QUESTION_TIMER = int(os.getenv("DEFAULT_QUESTION_TIMER", "20"))  # in seconds
+MAX_OPTIONS = 10
+MIN_OPTIONS = 2

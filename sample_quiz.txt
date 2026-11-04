@@ -1,0 +1,23 @@
+Q1. Bharat ki rajdhani kya hai?
+A) Mumbai
+B) Kolkata
+C) New Delhi
+D) Chennai
+Ans: C
+Exp: New Delhi 1911 me Bharat ki rajdhani ghoshit hui thi.
+
+Q2. Python programming language kisne develop ki thi?
+A) James Gosling
+B) Guido van Rossum
+C) Dennis Ritchie
+D) Bjarne Stroustrup
+Ans: B
+Exp: Guido van Rossum ne 1991 me Python release ki thi.
+
+Q3. Suraj ke sabse pass kaunsa grah (planet) hai?
+A) Venus
+B) Mars
+C) Mercury (Budh)
+D) Jupiter
+Ans: C
+Exp: Mercury hamare solar system ka sabse chhota aur Suraj ke sabse pass grah hai.

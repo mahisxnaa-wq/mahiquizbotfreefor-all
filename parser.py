@@ -1,43 +1,67 @@
 import re
-from db import add_general_question
+from typing import List, Dict, Any, Optional
 
-def parse_and_save_quiz_text(raw_text: str, default_cat: str = "general") -> int:
+def parse_questions_from_text(raw_text: str) -> List[Dict[str, Any]]:
     """
-    Format:
-    Q: Bharat ki rajdhani kya hai?
-    A) Mumbai
-    B) New Delhi
-    C) Kolkata
-    D) Chennai
-    Ans: B
-    Exp: New Delhi Bharat ki rajdhani hai.
+    Format parse karta hai jaise:
+    Q1. Question text here?
+    A) Option 1
+    B) Option 2
+    C) Option 3
+    D) Option 4
+    Ans: C ya Answer: 3
+    Exp: Explanation text (optional)
     """
-    blocks = raw_text.strip().split("\n\n")
-    saved_count = 0
-    
+    # Double newlines se blocks me split karein
+    blocks = re.split(r'\n\s*\n', raw_text.strip())
+    questions = []
+
     for block in blocks:
-        lines = [line.strip() for line in block.split("\n") if line.strip()]
-        if len(lines) < 5:
+        lines = [line.strip() for line in block.split('\n') if line.strip()]
+        if len(lines) < 3:
             continue
-            
-        question = lines[0].replace("Q:", "").replace("Q.", "").strip()
-        opt_a = lines[1].replace("A)", "").replace("A.", "").strip()
-        opt_b = lines[2].replace("B)", "").replace("B.", "").strip()
-        opt_c = lines[3].replace("C)", "").replace("C.", "").strip()
-        opt_d = lines[4].replace("D)", "").replace("D.", "").strip()
-        
-        correct_id = 0
-        explanation = "Great job!"
-        
-        for line in lines[5:]:
-            if line.lower().startswith(("ans:", "ans.", "answer:")):
-                ans_char = line.split(":")[-1].strip().upper()
-                mapping = {"A": 0, "B": 1, "C": 2, "D": 3}
-                correct_id = mapping.get(ans_char, 0)
-            elif line.lower().startswith(("exp:", "explanation:")):
-                explanation = line.split(":", 1)[-1].strip()
-                
-        add_general_question(question, opt_a, opt_b, opt_c, opt_d, correct_id, explanation, default_cat)
-        saved_count += 1
-        
-    return saved_count
+
+        q_text = ""
+        options = []
+        correct_idx = -1
+        explanation = ""
+
+        # Option prefix patterns: A), B., 1), (A) etc.
+        opt_pattern = re.compile(r'^(?:[A-Da-d0-9][\.\)]|\([A-Da-d0-9]\))\s*(.+)$')
+        ans_pattern = re.compile(r'^(?:ans(?:wer)?|sahi\s*uttar|uttar)\s*[:=\-]?\s*([A-Da-d1-9])', re.IGNORECASE)
+        exp_pattern = re.compile(r'^(?:exp(?:lanation)?|vyakhya)\s*[:=\-]?\s*(.+)$', re.IGNORECASE)
+
+        for line in lines:
+            ans_match = ans_pattern.match(line)
+            exp_match = exp_pattern.match(line)
+            opt_match = opt_pattern.match(line)
+
+            if ans_match:
+                ans_char = ans_match.group(1).upper()
+                if ans_char in ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J']:
+                    correct_idx = ord(ans_char) - ord('A')
+                elif ans_char.isdigit():
+                    correct_idx = int(ans_char) - 1
+            elif exp_match:
+                explanation = exp_match.group(1).strip()
+            elif opt_match:
+                options.append(opt_match.group(1).strip())
+            else:
+                # Agar options shuru nahi huye hain toh question text hai
+                if not options:
+                    clean_line = re.sub(r'^(?:[Qq](?:uestion)?\s*\d*[\.\:]?|\d+[\.\)])\s*', '', line)
+                    if q_text:
+                        q_text += " " + clean_line
+                    else:
+                        q_text = clean_line
+
+        # Agar options mile aur correct_idx valid hai
+        if q_text and len(options) >= 2 and 0 <= correct_idx < len(options):
+            questions.append({
+                "question": q_text[:300],  # Telegram Poll question limit
+                "options": [opt[:100] for opt in options[:10]],  # Telegram option limit
+                "correct_option_index": correct_idx,
+                "explanation": explanation[:200] if explanation else ""
+            })
+
+    return questions

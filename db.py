@@ -1,221 +1,199 @@
 import sqlite3
 import json
-from datetime import datetime
-from config import DB_NAME
+import os
+import random
+import string
 
-def get_connection():
-    return sqlite3.connect(DB_NAME)
+DB_PATH = os.path.join(os.path.dirname(__file__), "quiz_bot.db")
 
 def init_db():
-    conn = get_connection()
-    c = conn.cursor()
-
-    # 1. Groups Table (Kon kahan bot add kar raha hai)
-    c.execute('''
-        CREATE TABLE IF NOT EXISTS groups (
-            chat_id INTEGER PRIMARY KEY,
-            title TEXT,
-            added_by_name TEXT,
-            added_by_id INTEGER,
-            joined_at TEXT
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS quizzes (
+            quiz_id TEXT PRIMARY KEY,
+            user_id INTEGER NOT NULL DEFAULT 0,
+            name TEXT NOT NULL,
+            timer INTEGER NOT NULL,
+            questions_json TEXT NOT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            creator_name TEXT,
+            sections_enabled INTEGER DEFAULT 0,
+            sections_json TEXT DEFAULT '[]'
         )
-    ''')
+    """)
+    
+    # Auto-migration for existing database schemas
+    cursor.execute("PRAGMA table_info(quizzes)")
+    columns = [info[1] for info in cursor.fetchall()]
+    if "user_id" not in columns:
+        cursor.execute("ALTER TABLE quizzes ADD COLUMN user_id INTEGER NOT NULL DEFAULT 0")
+    if "sections_enabled" not in columns:
+        cursor.execute("ALTER TABLE quizzes ADD COLUMN sections_enabled INTEGER DEFAULT 0")
+    if "sections_json" not in columns:
+        cursor.execute("ALTER TABLE quizzes ADD COLUMN sections_json TEXT DEFAULT '[]'")
 
-    # 2. Quizzes Table (User ke banaye hue custom quizzes)
-    c.execute('''
-        CREATE TABLE IF NOT EXISTS custom_quizzes (
-            quiz_id INTEGER PRIMARY KEY AUTOINCREMENT,
-            title TEXT,
-            creator_id INTEGER,
-            time_per_q INTEGER DEFAULT 15,
-            created_at TEXT
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS schedules (
+            quiz_id TEXT PRIMARY KEY,
+            user_id INTEGER NOT NULL DEFAULT 0,
+            scheduled_timestamp REAL NOT NULL,
+            time_str TEXT NOT NULL
         )
-    ''')
-
-    # 3. Questions Table (Har quiz ke andar ke questions)
-    c.execute('''
-        CREATE TABLE IF NOT EXISTS quiz_questions (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            quiz_id INTEGER,
-            question TEXT,
-            options_json TEXT,
-            correct_id INTEGER,
-            explanation TEXT,
-            FOREIGN KEY (quiz_id) REFERENCES custom_quizzes(quiz_id)
-        )
-    ''')
-
-    # 4. Global & Group Leaderboard Table
-    c.execute('''
-        CREATE TABLE IF NOT EXISTS scores (
-            chat_id INTEGER,
-            user_id INTEGER,
-            username TEXT,
-            score INTEGER DEFAULT 0,
-            PRIMARY KEY (chat_id, user_id)
-        )
-    ''')
-
-    # 5. Default General Question Bank
-    c.execute('''
-        CREATE TABLE IF NOT EXISTS general_questions (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            question TEXT,
-            opt_a TEXT,
-            opt_b TEXT,
-            opt_c TEXT,
-            opt_d TEXT,
-            correct_opt INTEGER,
-            explanation TEXT,
-            category TEXT DEFAULT 'general'
-        )
-    ''')
+    """)
+    
+    cursor.execute("PRAGMA table_info(schedules)")
+    sched_cols = [info[1] for info in cursor.fetchall()]
+    if "user_id" not in sched_cols:
+        cursor.execute("ALTER TABLE schedules ADD COLUMN user_id INTEGER NOT NULL DEFAULT 0")
 
     conn.commit()
     conn.close()
 
-# --- Quiz Creation Methods ---
-def create_new_quiz(title: str, creator_id: int, time_per_q: int = 15) -> int:
-    conn = get_connection()
-    c = conn.cursor()
-    created_at = datetime.now().strftime("%d-%m-%Y %H:%M")
-    c.execute('''
-        INSERT INTO custom_quizzes (title, creator_id, time_per_q, created_at)
-        VALUES (?, ?, ?, ?)
-    ''', (title, creator_id, time_per_q, created_at))
-    quiz_id = c.lastrowid
+def generate_quiz_id():
+    # Format: GG + 7 alphanumeric characters
+    chars = string.ascii_uppercase + string.digits
+    return f"GG{''.join(random.choices(chars, k=7))}"
+
+def save_quiz(user_id: int, name: str, timer: int, questions: list, creator_name: str = "User", sections_enabled: int = 0, sections: list = None) -> str:
+    if sections is None:
+        sections = []
+    quiz_id = generate_quiz_id()
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("""
+        INSERT INTO quizzes (quiz_id, user_id, name, timer, questions_json, creator_name, sections_enabled, sections_json)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    """, (quiz_id, user_id, name, timer, json.dumps(questions, ensure_ascii=False), creator_name, sections_enabled, json.dumps(sections, ensure_ascii=False)))
     conn.commit()
     conn.close()
     return quiz_id
 
-def add_question_to_quiz(quiz_id: int, question: str, options: list, correct_id: int, explanation: str = ""):
-    conn = get_connection()
-    c = conn.cursor()
-    c.execute('''
-        INSERT INTO quiz_questions (quiz_id, question, options_json, correct_id, explanation)
-        VALUES (?, ?, ?, ?, ?)
-    ''', (quiz_id, question, json.dumps(options), correct_id, explanation))
-    conn.commit()
+def get_quiz(quiz_id: str):
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("""
+        SELECT quiz_id, user_id, name, timer, questions_json, created_at, creator_name, sections_enabled, sections_json
+        FROM quizzes WHERE quiz_id = ?
+    """, (quiz_id,))
+    row = cursor.fetchone()
     conn.close()
-
-def set_quiz_timer(quiz_id: int, time_per_q: int):
-    conn = get_connection()
-    c = conn.cursor()
-    c.execute('UPDATE custom_quizzes SET time_per_q = ? WHERE quiz_id = ?', (time_per_q, quiz_id))
-    conn.commit()
-    conn.close()
-
-def get_quiz_by_id(quiz_id: int):
-    conn = get_connection()
-    c = conn.cursor()
-    c.execute('SELECT title, time_per_q FROM custom_quizzes WHERE quiz_id = ?', (quiz_id,))
-    quiz = c.fetchone()
-    if not quiz:
-        conn.close()
-        return None, []
-    
-    c.execute('SELECT question, options_json, correct_id, explanation FROM quiz_questions WHERE quiz_id = ?', (quiz_id,))
-    rows = c.fetchall()
-    questions = []
-    for r in rows:
-        questions.append({
-            "question": r[0],
-            "options": json.loads(r[1]),
-            "correct_id": r[2],
-            "explanation": r[3]
-        })
-    conn.close()
-    return {"id": quiz_id, "title": quiz[0], "time": quiz[1]}, questions
+    if row:
+        sec_enabled = row[7] if len(row) > 7 and row[7] is not None else 0
+        sec_list = json.loads(row[8]) if len(row) > 8 and row[8] is not None else []
+        return {
+            "quiz_id": row[0],
+            "user_id": row[1],
+            "name": row[2],
+            "timer": row[3],
+            "questions": json.loads(row[4]),
+            "created_at": row[5],
+            "creator_name": row[6],
+            "sections_enabled": sec_enabled,
+            "sections": sec_list
+        }
+    return None
 
 def get_user_quizzes(user_id: int):
-    conn = get_connection()
-    c = conn.cursor()
-    c.execute('SELECT quiz_id, title FROM custom_quizzes WHERE creator_id = ? ORDER BY quiz_id DESC', (user_id,))
-    rows = c.fetchall()
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("""
+        SELECT quiz_id, user_id, name, timer, questions_json, created_at, creator_name, sections_enabled, sections_json
+        FROM quizzes WHERE user_id = ? ORDER BY created_at DESC
+    """, (user_id,))
+    rows = cursor.fetchall()
     conn.close()
-    return rows
+    results = []
+    for row in rows:
+        sec_enabled = row[7] if len(row) > 7 and row[7] is not None else 0
+        sec_list = json.loads(row[8]) if len(row) > 8 and row[8] is not None else []
+        results.append({
+            "quiz_id": row[0],
+            "user_id": row[1],
+            "name": row[2],
+            "timer": row[3],
+            "questions": json.loads(row[4]),
+            "created_at": row[5],
+            "creator_name": row[6],
+            "sections_enabled": sec_enabled,
+            "sections": sec_list
+        })
+    return results
 
-# --- Group Tracking Methods ---
-def save_group(chat_id: int, title: str, added_by_name: str, added_by_id: int):
-    conn = get_connection()
-    c = conn.cursor()
-    joined_at = datetime.now().strftime("%d-%m-%Y %H:%M:%S")
-    c.execute('''
-        INSERT INTO groups (chat_id, title, added_by_name, added_by_id, joined_at)
-        VALUES (?, ?, ?, ?, ?)
-        ON CONFLICT(chat_id) DO UPDATE SET
-            title = ?, added_by_name = ?, joined_at = ?
-    ''', (chat_id, title, added_by_name, added_by_id, joined_at, title, added_by_name, joined_at))
+def delete_quiz(quiz_id: str, user_id: int):
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("DELETE FROM quizzes WHERE quiz_id = ? AND user_id = ?", (quiz_id, user_id))
     conn.commit()
     conn.close()
 
-def remove_group(chat_id: int):
-    conn = get_connection()
-    c = conn.cursor()
-    c.execute("DELETE FROM groups WHERE chat_id = ?", (chat_id,))
-    conn.commit()
-    conn.close()
-
-def get_all_groups():
-    conn = get_connection()
-    c = conn.cursor()
-    c.execute("SELECT title, chat_id, added_by_name, joined_at FROM groups")
-    rows = c.fetchall()
-    conn.close()
-    return rows
-
-# --- Leaderboard Methods ---
-def update_score(chat_id: int, user_id: int, username: str, points: int = 1):
-    conn = get_connection()
-    c = conn.cursor()
-    c.execute('''
-        INSERT INTO scores (chat_id, user_id, username, score)
+def save_schedule(quiz_id: str, user_id: int, scheduled_timestamp: float, time_str: str):
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("""
+        INSERT OR REPLACE INTO schedules (quiz_id, user_id, scheduled_timestamp, time_str)
         VALUES (?, ?, ?, ?)
-        ON CONFLICT(chat_id, user_id) DO UPDATE SET
-            score = score + ?, username = ?
-    ''', (chat_id, user_id, username, points, points, username))
+    """, (quiz_id, user_id, scheduled_timestamp, time_str))
     conn.commit()
     conn.close()
 
-def get_leaderboard(chat_id: int, limit: int = 10):
-    conn = get_connection()
-    c = conn.cursor()
-    c.execute('''
-        SELECT username, score FROM scores
-        WHERE chat_id = ?
-        ORDER BY score DESC LIMIT ?
-    ''', (chat_id, limit))
-    rows = c.fetchall()
+def get_active_schedules():
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("SELECT quiz_id, user_id, scheduled_timestamp, time_str FROM schedules")
+    rows = cursor.fetchall()
     conn.close()
-    return rows
+    return [
+        {
+            "quiz_id": r[0],
+            "user_id": r[1],
+            "scheduled_timestamp": r[2],
+            "time_str": r[3]
+        }
+        for r in rows
+    ]
 
-# --- General Bank Methods ---
-def add_general_question(q, a, b, c_opt, d, correct_id, explanation, cat="general"):
-    conn = get_connection()
-    c = conn.cursor()
-    c.execute('''
-        INSERT INTO general_questions (question, opt_a, opt_b, opt_c, opt_d, correct_opt, explanation, category)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-    ''', (q, a, b, c_opt, d, correct_id, explanation, cat))
+def delete_schedule(quiz_id: str, user_id: int = None):
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    if user_id:
+        cursor.execute("DELETE FROM schedules WHERE quiz_id = ? AND user_id = ?", (quiz_id, user_id))
+    else:
+        cursor.execute("DELETE FROM schedules WHERE quiz_id = ?", (quiz_id,))
     conn.commit()
     conn.close()
 
-def get_random_general_question():
-    conn = get_connection()
-    c = conn.cursor()
-    c.execute("SELECT question, opt_a, opt_b, opt_c, opt_d, correct_opt, explanation FROM general_questions ORDER BY RANDOM() LIMIT 1")
-    row = c.fetchone()
+def update_quiz_name(quiz_id: str, user_id: int, new_name: str):
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("UPDATE quizzes SET name = ? WHERE quiz_id = ? AND user_id = ?", (new_name, quiz_id, user_id))
+    conn.commit()
     conn.close()
-    return row
 
-def get_system_stats():
-    conn = get_connection()
-    c = conn.cursor()
-    c.execute("SELECT COUNT(*) FROM groups")
-    g_count = c.fetchone()[0]
-    c.execute("SELECT COUNT(DISTINCT user_id) FROM scores")
-    u_count = c.fetchone()[0]
-    c.execute("SELECT COUNT(*) FROM custom_quizzes")
-    q_count = c.fetchone()[0]
+def update_quiz_timer(quiz_id: str, user_id: int, new_timer: int):
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("UPDATE quizzes SET timer = ? WHERE quiz_id = ? AND user_id = ?", (new_timer, quiz_id, user_id))
+    conn.commit()
     conn.close()
-    return g_count, u_count, q_count
+
+def update_quiz_questions(quiz_id: str, user_id: int, questions: list):
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("UPDATE quizzes SET questions_json = ? WHERE quiz_id = ? AND user_id = ?", (json.dumps(questions, ensure_ascii=False), quiz_id, user_id))
+    conn.commit()
+    conn.close()
+
+def update_quiz_sections_enabled(quiz_id: str, user_id: int, enabled: int):
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("UPDATE quizzes SET sections_enabled = ? WHERE quiz_id = ? AND user_id = ?", (enabled, quiz_id, user_id))
+    conn.commit()
+    conn.close()
+
+def update_quiz_sections(quiz_id: str, user_id: int, sections: list):
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("UPDATE quizzes SET sections_json = ? WHERE quiz_id = ? AND user_id = ?", (json.dumps(sections, ensure_ascii=False), quiz_id, user_id))
+    conn.commit()
+    conn.close()

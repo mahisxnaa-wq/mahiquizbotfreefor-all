@@ -1,200 +1,622 @@
-import os
-import random
-import sqlite3
+import logging
 import asyncio
-from aiohttp import web
-from telegram import Update
+import io
+from typing import Dict, Any
+
+from telegram import (
+    Update,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    Poll,
+)
+from telegram.constants import ParseMode, ChatType
 from telegram.ext import (
     Application,
     CommandHandler,
+    CallbackQueryHandler,
+    MessageHandler,
     PollAnswerHandler,
+    ConversationHandler,
     ContextTypes,
+    filters,
 )
-from questions import QUIZ_DATA
 
-# Environment variables se token lena
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-PORT = int(os.getenv("PORT", 8080))
+import config
+from database import Database
+from parser import parse_questions_from_text
+from image_generator import create_question_image
 
-# Database Setup (Leaderboard & Points)
-DB_FILE = "quiz_bot.db"
+# Logging setup
+logging.basicConfig(
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO
+)
+logger = logging.getLogger(__name__)
 
-def init_db():
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    c.execute('''
-        CREATE TABLE IF NOT EXISTS scores (
-            chat_id INTEGER,
-            user_id INTEGER,
-            username TEXT,
-            score INTEGER DEFAULT 0,
-            PRIMARY KEY (chat_id, user_id)
-        )
-    ''')
-    conn.commit()
-    conn.close()
+db = Database(config.DB_NAME)
 
-def update_score(chat_id: int, user_id: int, username: str, points: int = 1):
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    c.execute('''
-        INSERT INTO scores (chat_id, user_id, username, score)
-        VALUES (?, ?, ?, ?)
-        ON CONFLICT(chat_id, user_id) DO UPDATE SET
-            score = score + ?,
-            username = ?
-    ''', (chat_id, user_id, username, points, points, username))
-    conn.commit()
-    conn.close()
+# States for /newquiz Conversation
+TITLE, TIMER, QUESTION_PROMPT, OPTIONS_PROMPT, CORRECT_PROMPT, EXPLANATION_PROMPT = range(6)
 
-def get_top_scores(chat_id: int, limit: int = 10):
-    conn = sqlite3.connect(DB_FILE)
-    c = conn.cursor()
-    c.execute('''
-        SELECT username, score FROM scores
-        WHERE chat_id = ?
-        ORDER BY score DESC
-        LIMIT ?
-    ''', (chat_id, limit))
-    rows = c.fetchall()
-    conn.close()
-    return rows
+# In-memory tracking of active quiz sessions: chat_id -> SessionData
+active_sessions: Dict[int, Dict[str, Any]] = {}
 
-# Track active polls: {poll_id: {"correct_id": int, "chat_id": int}}
-ACTIVE_POLLS = {}
 
-# Commands
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Start command handler"""
+    user = update.effective_user
+    chat = update.effective_chat
+
+    await db.register_user(user.id, user.username, user.first_name)
+
+    keyboard = [
+        [
+            InlineKeyboardButton("🎯 Play Quiz", callback_data="list_quizzes"),
+            InlineKeyboardButton("➕ Create Quiz", callback_data="create_quiz_info"),
+        ],
+        [
+            InlineKeyboardButton("🏆 Leaderboard", callback_data="show_leaderboard"),
+            InlineKeyboardButton("ℹ️ Help", callback_data="show_help"),
+        ],
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+
     welcome_text = (
-        "👋 **Namaste! Main Study Group Quiz Bot hoon!**\n\n"
-        "Aap mujhe apne group me add kar sakte hain aur quiz chalu kar sakte hain.\n\n"
-        "📌 **Available Commands:**\n"
-        "• `/quiz` - Ek random quiz question start karein\n"
-        "• `/quiz <category>` - Specific topic ka quiz (e.g., `/quiz science`, `/quiz computer`, `/quiz gk`)\n"
-        "• `/leaderboard` - Group ke top scorers ki list dekhein\n"
-        "• `/help` - Help aur jankari\n\n"
-        "👥 *Group me mujhe Admin banayein taaki main smoothly Polls bhej sakun!*"
+        f"👋 **Namaste {user.first_name}!**\n\n"
+        "Main aapka **Telegram Quiz Bot** hoon! 🧠\n\n"
+        "✨ **Aap yahan kya-kya kar sakte hain:**\n"
+        "• Naye quizzes create kar sakte hain (`/newquiz`)\n"
+        "• Text format ya `.txt` file bhejkar ek click me quiz bana sakte hain\n"
+        "• Telegram Groups me dosto ke sath quiz contest chala sakte hain\n"
+        "• Real-time leaderboard aur rankings dekh sakte hain\n\n"
+        "Neeche diye gaye buttons se shuru karein 👇"
     )
-    await update.message.reply_text(welcome_text, parse_mode="Markdown")
+
+    await update.message.reply_text(
+        welcome_text, parse_mode=ParseMode.MARKDOWN, reply_markup=reply_markup
+    )
+
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Help command handler"""
     help_text = (
         "📖 **Bot Commands Guide:**\n\n"
-        "1. `/quiz` : Instant sawaal aayega jisme 4 options honge.\n"
-        "2. Categories: `/quiz science`, `/quiz gk`, `/quiz computer`, `/quiz history`\n"
-        "3. Har sahi jawab par **+1 Point** milta hai!\n"
-        "4. `/leaderboard` type karke group ranking check karein."
+        "• `/start` - Bot ko shuru karein aur main menu dekhein\n"
+        "• `/quizzes` - Available quizzes ki list dekhein\n"
+        "• `/newquiz` - Step-by-step naya quiz banayein\n"
+        "• `/leaderboard` - Top rankers ki list dekhein\n"
+        "• `/cancel` - Chalu process cancel karein\n\n"
+        "📝 **Bulk Questions Add Karne Ka Tarika:**\n"
+        "Aap direct is format me text ya `.txt` file bhej sakte hain:\n"
+        "```\n"
+        "Q1. Bharat ki rajdhani kya hai?\n"
+        "A) Mumbai\n"
+        "B) Kolkata\n"
+        "C) New Delhi\n"
+        "D) Chennai\n"
+        "Ans: C\n"
+        "Exp: 1911 me New Delhi rajdhani ghoshit hui thi.\n"
+        "```"
     )
-    await update.message.reply_text(help_text, parse_mode="Markdown")
+    if update.callback_query:
+        await update.callback_query.message.reply_text(help_text, parse_mode=ParseMode.MARKDOWN)
+    else:
+        await update.message.reply_text(help_text, parse_mode=ParseMode.MARKDOWN)
 
-async def quiz_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = update.effective_chat.id
-    args = context.args
 
-    # Category filter
-    filtered_questions = QUIZ_DATA
-    if args:
-        requested_category = args[0].lower()
-        cat_matches = [q for q in QUIZ_DATA if q.get("category", "").lower() == requested_category]
-        if cat_matches:
-            filtered_questions = cat_matches
+# ---------------------- STEP-BY-STEP QUIZ CREATOR ----------------------
+
+async def newquiz_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Interactive quiz creation shuru karna"""
+    context.user_data.clear()
+    context.user_data["questions"] = []
+
+    await update.message.reply_text(
+        "📝 **Naya Quiz Banayein!**\n\n"
+        "Sabse pehle apne **Quiz ka Title/Naam** bhejiye:\n"
+        "(Jaise: *General Knowledge Test* ya *Class 10 Science*)\n\n"
+        "Cancel karne ke liye `/cancel` likhein.",
+        parse_mode=ParseMode.MARKDOWN
+    )
+    return TITLE
+
+
+async def newquiz_title(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    title = update.message.text.strip()
+    context.user_data["title"] = title
+
+    await update.message.reply_text(
+        f"✅ Title: **{title}**\n\n"
+        "Har question ke liye kitna **Timer (Seconds)** rakhna chahte hain?\n"
+        "(Recommended: 15, 20, 30, ya 45)",
+        parse_mode=ParseMode.MARKDOWN
+    )
+    return TIMER
+
+
+async def newquiz_timer(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text.strip()
+    timer = int(text) if text.isdigit() and 10 <= int(text) <= 300 else config.DEFAULT_QUESTION_TIMER
+    context.user_data["timer"] = timer
+
+    await update.message.reply_text(
+        f"⏱️ Timer set ho gaya: **{timer} seconds**\n\n"
+        "Ab apna **Question 1** bhejiye:\n\n"
+        "*(Jab sabhi questions add ho jayein, toh `/done` dabayein)*",
+        parse_mode=ParseMode.MARKDOWN
+    )
+    return QUESTION_PROMPT
+
+
+async def newquiz_question(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text.strip()
+    if text.lower() == "/done":
+        return await newquiz_finish(update, context)
+
+    context.user_data["current_question"] = text
+    await update.message.reply_text(
+        "Ab is question ke **4 Options** bhejiye (har option nayi line me):\n\n"
+        "Example:\n"
+        "Mumbai\n"
+        "Kolkata\n"
+        "New Delhi\n"
+        "Chennai"
+    )
+    return OPTIONS_PROMPT
+
+
+async def newquiz_options(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    raw_lines = [line.strip() for line in update.message.text.split("\n") if line.strip()]
+    if len(raw_lines) < 2:
+        await update.message.reply_text("❌ Kam se kam 2 options hone chahiye. Dobara options bhejiye:")
+        return OPTIONS_PROMPT
+
+    context.user_data["current_options"] = raw_lines[:10]
+
+    # Show numbers to pick correct option
+    opts_display = "\n".join([f"{i+1}) {opt}" for i, opt in enumerate(context.user_data["current_options"])])
+    await update.message.reply_text(
+        f"Options note ho gaye:\n{opts_display}\n\n"
+        "Inme se **Sahi Answer kaunsa number hai?** (1, 2, 3, ya 4 likhein):"
+    )
+    return CORRECT_PROMPT
+
+
+async def newquiz_correct(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text.strip()
+    if not text.isdigit():
+        await update.message.reply_text("❌ Kripya sahi number dalein (e.g. 1, 2, 3):")
+        return CORRECT_PROMPT
+
+    correct_idx = int(text) - 1
+    total_opts = len(context.user_data["current_options"])
+    if not (0 <= correct_idx < total_opts):
+        await update.message.reply_text(f"❌ 1 se {total_opts} ke beech number chunein:")
+        return CORRECT_PROMPT
+
+    context.user_data["current_correct"] = correct_idx
+
+    await update.message.reply_text(
+        "💡 Is question ka koi **Explanation (Vyakhya)** dena chahte hain?\n"
+        "Agar nahi, toh `/skip` likhein."
+    )
+    return EXPLANATION_PROMPT
+
+
+async def newquiz_explanation(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text.strip()
+    explanation = "" if text.lower() == "/skip" else text
+
+    # Question save karein list me
+    q_data = {
+        "question": context.user_data["current_question"],
+        "options": context.user_data["current_options"],
+        "correct_option_index": context.user_data["current_correct"],
+        "explanation": explanation,
+    }
+    context.user_data["questions"].append(q_data)
+
+    q_count = len(context.user_data["questions"])
+    await update.message.reply_text(
+        f"✅ **Question #{q_count} add ho gaya!**\n\n"
+        "Agla question bhejiye, ya agar quiz complete ho gaya toh `/done` dabayein.",
+        parse_mode=ParseMode.MARKDOWN
+    )
+    return QUESTION_PROMPT
+
+
+async def newquiz_finish(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    questions = context.user_data.get("questions", [])
+    if not questions:
+        await update.message.reply_text("❌ Aapne koi question add nahi kiya. Quiz cancel ho gaya.")
+        return ConversationHandler.END
+
+    title = context.user_data.get("title", "Untitled Quiz")
+    timer = context.user_data.get("timer", config.DEFAULT_QUESTION_TIMER)
+    user_id = update.effective_user.id
+
+    quiz_id = await db.create_quiz(creator_id=user_id, title=title, timer=timer)
+    for q in questions:
+        await db.add_question(
+            quiz_id=quiz_id,
+            question_text=q["question"],
+            options=q["options"],
+            correct_idx=q["correct_option_index"],
+            explanation=q.get("explanation", ""),
+        )
+
+    await update.message.reply_text(
+        f"🎉 **Badhai ho! Aapka Quiz create ho gaya hai!**\n\n"
+        f"📌 **Title:** {title}\n"
+        f"🔢 **Total Questions:** {len(questions)}\n"
+        f"⏱️ **Timer per Question:** {timer}s\n"
+        f"🆔 **Quiz ID:** `{quiz_id}`\n\n"
+        f"Khelne ke liye click karein:\n"
+        f"👉 `/play_{quiz_id}`",
+        parse_mode=ParseMode.MARKDOWN
+    )
+    context.user_data.clear()
+    return ConversationHandler.END
+
+
+async def cancel_conversation(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data.clear()
+    await update.message.reply_text("🚫 Process cancel kar di gayi hai.")
+    return ConversationHandler.END
+
+
+# ---------------------- BULK TEXT / FILE PARSER ----------------------
+
+async def handle_text_or_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """User ke text ya document ko scan karke bulk me quiz banana"""
+    raw_text = ""
+
+    if update.message.document:
+        doc = update.message.document
+        if doc.file_name and doc.file_name.endswith((".txt", ".text")):
+            file = await doc.get_file()
+            byte_content = await file.download_as_bytearray()
+            raw_text = byte_content.decode("utf-8", errors="ignore")
         else:
-            await update.message.reply_text(
-                f"⚠️ Category '{requested_category}' nahi mili. Available: `science`, `computer`, `gk`, `history`.\nRandom sawaal bheja ja raha hai!",
-                parse_mode="Markdown"
-            )
+            return  # Non-text doc ignore karein
+    elif update.message.text:
+        text = update.message.text
+        # Agar Q1 ya Question pattern match ho
+        if "Q1" in text or "Q." in text or "Ans:" in text or "Answer:" in text:
+            raw_text = text
 
-    selected_q = random.choice(filtered_questions)
+    if not raw_text:
+        return
 
-    # Send Native Quiz Poll
-    # is_anonymous=False is REQUIRED to track scores!
-    message = await context.bot.send_poll(
-        chat_id=chat_id,
-        question=f"📚 {selected_q['question']}",
-        options=selected_q["options"],
-        type="quiz",
-        correct_option_id=selected_q["correct_id"],
-        explanation=selected_q.get("explanation", "Great job!"),
-        is_anonymous=False
+    questions = parse_questions_from_text(raw_text)
+    if not questions:
+        return
+
+    user_id = update.effective_user.id
+    title = f"Quick Quiz ({len(questions)} Questions)"
+    quiz_id = await db.create_quiz(creator_id=user_id, title=title, timer=config.DEFAULT_QUESTION_TIMER)
+
+    for q in questions:
+        await db.add_question(
+            quiz_id=quiz_id,
+            question_text=q["question"],
+            options=q["options"],
+            correct_idx=q["correct_option_index"],
+            explanation=q.get("explanation", "")
+        )
+
+    await update.message.reply_text(
+        f"⚡ **Bulk Import Successful!**\n\n"
+        f"Humne aapke text se **{len(questions)} Questions** extract karke naya quiz bana diya hai!\n\n"
+        f"🆔 **Quiz ID:** `{quiz_id}`\n"
+        f"👉 Khelne ke liye dabayein: `/play_{quiz_id}`",
+        parse_mode=ParseMode.MARKDOWN
     )
 
-    # Store poll context to verify answer
-    ACTIVE_POLLS[message.poll.id] = {
-        "correct_id": selected_q["correct_id"],
-        "chat_id": chat_id
+
+# ---------------------- PLAY QUIZ / LIVE ENGINE ----------------------
+
+async def list_quizzes_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Available quizzes list show karna"""
+    quizzes = await db.get_all_quizzes(limit=10)
+    if not quizzes:
+        msg = "Abhi koi quiz available nahi hai. Aap `/newquiz` se pehla quiz banayein!"
+        if update.callback_query:
+            await update.callback_query.message.reply_text(msg)
+        else:
+            await update.message.reply_text(msg)
+        return
+
+    buttons = []
+    for q in quizzes:
+        buttons.append([
+            InlineKeyboardButton(
+                f"🎯 {q['title']} ({q['total_questions']} Qs)",
+                callback_data=f"startquiz_{q['quiz_id']}"
+            )
+        ])
+
+    reply_markup = InlineKeyboardMarkup(buttons)
+    text = "📚 **Neeche diye gaye Quizzes me se chunein:**"
+
+    if update.callback_query:
+        await update.callback_query.message.reply_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=reply_markup)
+    else:
+        await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=reply_markup)
+
+
+async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Buttons ke click ko handle karna"""
+    query = update.callback_query
+    await query.answer()
+
+    data = query.data
+    if data == "list_quizzes":
+        await list_quizzes_command(update, context)
+    elif data == "create_quiz_info":
+        await query.message.reply_text(
+            "➕ Naya quiz banane ke liye `/newquiz` command ka upayog karein, ya directly questions ka text paste karein!"
+        )
+    elif data == "show_leaderboard":
+        await leaderboard_command(update, context)
+    elif data == "show_help":
+        await help_command(update, context)
+    elif data.startswith("startquiz_"):
+        quiz_id = int(data.split("_")[1])
+        await start_quiz_session(quiz_id, update.effective_chat.id, context)
+
+
+async def play_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Direct `/play_123` command se quiz shuru karna"""
+    text = update.message.text
+    parts = text.split("_")
+    if len(parts) > 1 and parts[1].isdigit():
+        quiz_id = int(parts[1])
+        await start_quiz_session(quiz_id, update.effective_chat.id, context)
+    else:
+        await list_quizzes_command(update, context)
+
+
+async def start_quiz_session(quiz_id: int, chat_id: int, context: ContextTypes.DEFAULT_TYPE):
+    """Quiz session initialize karna aur questions bhejna"""
+    quiz = await db.get_quiz(quiz_id)
+    questions = await db.get_quiz_questions(quiz_id)
+
+    if not quiz or not questions:
+        await context.bot.send_message(chat_id=chat_id, text="❌ Yeh quiz khali hai ya nahi mila.")
+        return
+
+    # Session state
+    active_sessions[chat_id] = {
+        "quiz_id": quiz_id,
+        "title": quiz["title"],
+        "timer": quiz["timer_seconds"],
+        "questions": questions,
+        "current_index": 0,
+        "scores": {},  # user_id -> score
+        "active_poll_id": None,
     }
 
-async def handle_poll_answer(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    answer = update.poll_answer
-    poll_id = answer.poll_id
-    user = answer.user
-    selected_options = answer.option_ids
+    await context.bot.send_message(
+        chat_id=chat_id,
+        text=(
+            f"🚀 **Quiz Shuru Ho Raha Hai!**\n\n"
+            f"📖 **Title:** {quiz['title']}\n"
+            f"🔢 **Total Questions:** {len(questions)}\n"
+            f"⏱️ **Timer:** {quiz['timer_seconds']}s per question\n\n"
+            f"Tayyar ho jaiye! Question 1 aa raha hai..."
+        ),
+        parse_mode=ParseMode.MARKDOWN
+    )
+    await asyncio.sleep(2)
+    await send_next_question(chat_id, context)
 
-    if poll_id in ACTIVE_POLLS and selected_options:
-        poll_info = ACTIVE_POLLS[poll_id]
-        if selected_options[0] == poll_info["correct_id"]:
-            chat_id = poll_info["chat_id"]
-            username = user.first_name or user.username or f"User_{user.id}"
-            update_score(chat_id, user.id, username, points=1)
+
+async def send_next_question(chat_id: int, context: ContextTypes.DEFAULT_TYPE):
+    """Agla question Telegram Poll ki tarah bhejna"""
+    session = active_sessions.get(chat_id)
+    if not session:
+        return
+
+    idx = session["current_index"]
+    questions = session["questions"]
+
+    if idx >= len(questions):
+        # Quiz khatam ho gaya
+        await finish_quiz_session(chat_id, context)
+        return
+
+    q = questions[idx]
+    timer = session["timer"]
+
+    # 1. Option: Image card generate karke bhejna (Pillow)
+    try:
+        img_bio = create_question_image(
+            question_text=f"Q{idx+1}. {q['question_text']}",
+            options=q["options"],
+            quiz_title=session["title"]
+        )
+        await context.bot.send_photo(chat_id=chat_id, photo=img_bio)
+    except Exception as e:
+        logger.warning(f"Image generation failed: {e}")
+
+    # 2. Native Telegram Quiz Poll bhejna
+    poll_msg = await context.bot.send_poll(
+        chat_id=chat_id,
+        question=f"Q{idx+1}: {q['question_text'][:250]}",
+        options=q["options"][:10],
+        type=Poll.QUIZ,
+        correct_option_id=q["correct_option_index"],
+        open_period=timer,
+        is_anonymous=False,
+        explanation=q.get("explanation", "")[:200] if q.get("explanation") else None,
+    )
+
+    session["active_poll_id"] = poll_msg.poll.id
+    session["current_index"] += 1
+
+    # Timer wait karke next question bhejenge
+    context.job_queue.run_once(
+        quiz_timer_callback,
+        when=timer + 2,
+        chat_id=chat_id,
+        name=f"quiz_timer_{chat_id}_{idx}"
+    )
+
+
+async def quiz_timer_callback(context: ContextTypes.DEFAULT_TYPE):
+    """Timer khatam hone par agla question trigger karna"""
+    chat_id = context.job.chat_id
+    await send_next_question(chat_id, context)
+
+
+async def handle_poll_answer(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """User ke poll answer dene par score track karna"""
+    answer = update.poll_answer
+    user = answer.user
+    selected_option = answer.option_ids[0] if answer.option_ids else None
+
+    # Find the active session that matches this poll
+    for chat_id, session in active_sessions.items():
+        if session.get("active_poll_id") == answer.poll_id:
+            curr_idx = session["current_index"] - 1
+            if 0 <= curr_idx < len(session["questions"]):
+                correct_idx = session["questions"][curr_idx]["correct_option_index"]
+                if selected_option == correct_idx:
+                    session["scores"][user.id] = session["scores"].get(user.id, 0) + 1
+                    # Save user info
+                    await db.register_user(user.id, user.username, user.first_name)
+            break
+
+
+async def finish_quiz_session(chat_id: int, context: ContextTypes.DEFAULT_TYPE):
+    """Quiz complete hone par leaderboard display karna"""
+    session = active_sessions.pop(chat_id, None)
+    if not session:
+        return
+
+    scores = session["scores"]
+    quiz_id = session["quiz_id"]
+    total_q = len(session["questions"])
+
+    # DB me save karein
+    for uid, sc in scores.items():
+        await db.record_score(quiz_id, chat_id, uid, sc, total_q)
+
+    # Sort scores
+    sorted_scores = sorted(scores.items(), key=lambda x: x[1], reverse=True)
+
+    result_text = f"🏁 **Quiz Samapt (Completed)!**\n\n📖 **{session['title']}**\n\n🏆 **Leaderboard:**\n"
+    if not sorted_scores:
+        result_text += "Kisi ne bhi answer nahi diya."
+    else:
+        medals = ["🥇", "🥈", "🥉", "🎖️", "🎖️"]
+        for rank, (uid, sc) in enumerate(sorted_scores[:10], start=1):
+            medal = medals[rank - 1] if rank <= len(medals) else "🔹"
+            result_text += f"{medal} **Rank {rank}:** `{sc}/{total_q}` Sahi\n"
+
+    await context.bot.send_message(chat_id=chat_id, text=result_text, parse_mode=ParseMode.MARKDOWN)
+
+
+# ---------------------- LEADERBOARD & ADMIN ----------------------
 
 async def leaderboard_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = update.effective_chat.id
-    top_users = get_top_scores(chat_id, limit=10)
+    """Overall Leaderboard dekhna"""
+    leaders = await db.get_leaderboard(limit=10)
+    if not leaders:
+        msg = "🏆 Abhi tak koi score record nahi hua hai."
+    else:
+        msg = "🏆 **Global Top Rankers:**\n\n"
+        medals = ["🥇", "🥈", "🥉", "🎖️", "🎖️"]
+        for i, user in enumerate(leaders, start=1):
+            medal = medals[i - 1] if i <= len(medals) else "🔹"
+            name = user["first_name"] or user["username"] or "Learner"
+            msg += f"{medal} **{name}**: `{user['score']}` Points\n"
 
-    if not top_users:
-        await update.message.reply_text("🏆 Abhi tak kisi ne koi points score nahi kiye! `/quiz` start karein.")
+    if update.callback_query:
+        await update.callback_query.message.reply_text(msg, parse_mode=ParseMode.MARKDOWN)
+    else:
+        await update.message.reply_text(msg, parse_mode=ParseMode.MARKDOWN)
+
+
+async def broadcast_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Admin broadcast command (`/broadcast message`)"""
+    user_id = update.effective_user.id
+    if user_id not in config.ADMIN_IDS and config.ADMIN_IDS != [0]:
+        await update.message.reply_text("❌ Aap admin nahi hain.")
         return
 
-    text = "🏆 **Group Quiz Leaderboard** 🏆\n\n"
-    medals = ["🥇", "🥈", "🥉"]
-
-    for idx, (username, score) in enumerate(top_users, start=1):
-        badge = medals[idx - 1] if idx <= 3 else f"{idx}."
-        text += f"{badge} **{username}** : {score} pts\n"
-
-    await update.message.reply_text(text, parse_mode="Markdown")
-
-# Render ke free web service ke liye lightweight HTTP ping server
-async def web_server():
-    async def handle_ping(request):
-        return web.Response(text="Bot is running active and fine!")
-
-    app = web.Application()
-    app.router.add_get("/", handle_ping)
-    runner = web.AppRunner(app)
-    await runner.setup()
-    site = web.TCPSite(runner, "0.0.0.0", PORT)
-    await site.start()
-    print(f"Web server started on port {PORT}")
-
-async def main():
-    if not BOT_TOKEN:
-        print("ERROR: BOT_TOKEN environment variable set nahi hai!")
+    msg_to_send = " ".join(context.args)
+    if not msg_to_send:
+        await update.message.reply_text("Upyog: `/broadcast Aapka Message Yahan`")
         return
 
-    init_db()
+    users = await db.get_all_users()
+    count = 0
+    for uid in users:
+        try:
+            await context.bot.send_message(chat_id=uid, text=msg_to_send, parse_mode=ParseMode.MARKDOWN)
+            count += 1
+            await asyncio.sleep(0.05)  # Telegram rate-limit prevention
+        except Exception:
+            pass
 
-    # Telegram bot application setup
-    application = Application.builder().token(BOT_TOKEN).build()
+    await update.message.reply_text(f"✅ Broadcast {count} users ko bhej diya gaya hai!")
 
-    application.add_handler(CommandHandler("start", start_command))
-    application.add_handler(CommandHandler("help", help_command))
-    application.add_handler(CommandHandler("quiz", quiz_command))
-    application.add_handler(CommandHandler("leaderboard", leaderboard_command))
-    application.add_handler(PollAnswerHandler(handle_poll_answer))
 
-    # Start dummy web server for Render
-    await web_server()
+# ---------------------- MAIN ENTRY POINT ----------------------
 
-    # Start polling
-    print("Bot is polling...")
-    await application.initialize()
-    await application.start()
-    await application.updater.start_polling(allowed_updates=Update.ALL_TYPES)
+def main():
+    """Bot application start karna"""
+    if config.BOT_TOKEN == "YOUR_BOT_TOKEN_HERE" or not config.BOT_TOKEN:
+        print("❌ ERROR: config.py me apna Telegram BOT_TOKEN dalein!")
+        return
 
-    # Keep running forever
-    while True:
-        await asyncio.sleep(3600)
+    # Database initialize
+    asyncio.get_event_loop().run_until_complete(db.init_db())
+
+    # Build Application
+    app = Application.builder().token(config.BOT_TOKEN).build()
+
+    # Conversation Handler for /newquiz
+    conv_handler = ConversationHandler(
+        entry_points=[CommandHandler("newquiz", newquiz_start)],
+        states={
+            TITLE: [MessageHandler(filters.TEXT & ~filters.COMMAND, newquiz_title)],
+            TIMER: [MessageHandler(filters.TEXT & ~filters.COMMAND, newquiz_timer)],
+            QUESTION_PROMPT: [
+                CommandHandler("done", newquiz_finish),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, newquiz_question)
+            ],
+            OPTIONS_PROMPT: [MessageHandler(filters.TEXT & ~filters.COMMAND, newquiz_options)],
+            CORRECT_PROMPT: [MessageHandler(filters.TEXT & ~filters.COMMAND, newquiz_correct)],
+            EXPLANATION_PROMPT: [
+                CommandHandler("skip", newquiz_explanation),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, newquiz_explanation)
+            ],
+        },
+        fallbacks=[CommandHandler("cancel", cancel_conversation)],
+    )
+
+    app.add_handler(CommandHandler("start", start_command))
+    app.add_handler(CommandHandler("help", help_command))
+    app.add_handler(CommandHandler("quizzes", list_quizzes_command))
+    app.add_handler(CommandHandler("leaderboard", leaderboard_command))
+    app.add_handler(CommandHandler("broadcast", broadcast_command))
+    app.add_handler(conv_handler)
+
+    # Dynamic /play_123 pattern
+    app.add_handler(MessageHandler(filters.Regex(r"^/play(_\d+)?$"), play_command))
+
+    # Bulk text or document parser
+    app.add_handler(MessageHandler(filters.Document.ALL | (filters.TEXT & ~filters.COMMAND), handle_text_or_document))
+
+    # Callbacks and Poll answers
+    app.add_handler(CallbackQueryHandler(handle_callback_query))
+    app.add_handler(PollAnswerHandler(handle_poll_answer))
+
+    print("🤖 Telegram Quiz Bot start ho raha hai...")
+    app.run_polling()
+
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()
