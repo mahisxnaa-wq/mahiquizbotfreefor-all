@@ -603,6 +603,103 @@ async def finish_quiz_session(chat_id: int, context: ContextTypes.DEFAULT_TYPE):
 
 # ---------------------- LEADERBOARD & ADMIN ----------------------
 
+async def is_group_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    """Check karo ki user group ka admin/owner hai ya nahi"""
+    chat = update.effective_chat
+    user_id = update.effective_user.id
+
+    # Private chat me sab allowed
+    if chat.type == "private":
+        return True
+
+    # Bot admin list me hai
+    if user_id in config.ADMIN_IDS:
+        return True
+
+    # Group admin/owner check
+    try:
+        member = await context.bot.get_chat_member(chat.id, user_id)
+        return member.status in ["creator", "administrator"]
+    except Exception:
+        return False
+
+
+async def stop_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/stop - Chalu quiz ko turant band karna (sirf admin)"""
+    if not await is_group_admin(update, context):
+        await update.message.reply_text("❌ Sirf group admin hi /stop command use kar sakte hain.")
+        return
+
+    chat_id = update.effective_chat.id
+    session = active_sessions.get(chat_id)
+
+    if not session:
+        await update.message.reply_text("⚠️ Is group me koi quiz chal nahi raha hai.")
+        return
+
+    # Cancel all scheduled timer jobs for this quiz
+    current_jobs = context.job_queue.get_jobs_by_name(f"qt_{chat_id}")
+    for job in context.job_queue.jobs():
+        if job.name and job.name.startswith(f"qt_{chat_id}_"):
+            job.schedule_removal()
+
+    await update.message.reply_text("🛑 **Quiz band kar diya gaya hai!**", parse_mode=ParseMode.MARKDOWN)
+    await finish_quiz_session(chat_id, context)
+
+
+async def fast_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/fast 10 - Timer kam karna (sirf admin)"""
+    if not await is_group_admin(update, context):
+        await update.message.reply_text("❌ Sirf group admin hi /fast command use kar sakte hain.")
+        return
+
+    chat_id = update.effective_chat.id
+    session = active_sessions.get(chat_id)
+
+    if not session:
+        await update.message.reply_text("⚠️ Koi quiz chal nahi raha hai.")
+        return
+
+    # Parse seconds from command
+    new_timer = config.DEFAULT_QUESTION_TIMER
+    if context.args and context.args[0].isdigit():
+        new_timer = max(5, int(context.args[0]))  # Minimum 5 seconds
+    else:
+        new_timer = max(5, session["timer"] - 5)  # Default: 5 sec kam
+
+    session["timer"] = new_timer
+    await update.message.reply_text(
+        f"⚡ **Timer fast kar diya!** Ab har question ka timer: **{new_timer}s**",
+        parse_mode=ParseMode.MARKDOWN
+    )
+
+
+async def slow_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/slow 30 - Timer badhaana (sirf admin)"""
+    if not await is_group_admin(update, context):
+        await update.message.reply_text("❌ Sirf group admin hi /slow command use kar sakte hain.")
+        return
+
+    chat_id = update.effective_chat.id
+    session = active_sessions.get(chat_id)
+
+    if not session:
+        await update.message.reply_text("⚠️ Koi quiz chal nahi raha hai.")
+        return
+
+    new_timer = config.DEFAULT_QUESTION_TIMER
+    if context.args and context.args[0].isdigit():
+        new_timer = min(300, int(context.args[0]))  # Maximum 5 minutes
+    else:
+        new_timer = min(300, session["timer"] + 5)  # Default: 5 sec zyada
+
+    session["timer"] = new_timer
+    await update.message.reply_text(
+        f"🐢 **Timer slow kar diya!** Ab har question ka timer: **{new_timer}s**",
+        parse_mode=ParseMode.MARKDOWN
+    )
+
+
 async def leaderboard_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     leaders = await db.get_leaderboard(limit=10)
     if not leaders:
@@ -696,6 +793,9 @@ def main():
     app.add_handler(CommandHandler("quizzes", list_quizzes_command))
     app.add_handler(CommandHandler("leaderboard", leaderboard_command))
     app.add_handler(CommandHandler("broadcast", broadcast_command))
+    app.add_handler(CommandHandler("stop", stop_command))
+    app.add_handler(CommandHandler("fast", fast_command))
+    app.add_handler(CommandHandler("slow", slow_command))
     app.add_handler(conv_handler)
 
     # /play_QUIZID
