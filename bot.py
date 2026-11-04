@@ -5,9 +5,10 @@ import os
 import re
 import json
 import time
+import datetime
 import threading
 from http.server import HTTPServer, BaseHTTPRequestHandler
-from typing import Dict, Any
+from typing import Dict, Any, Optional
 
 from telegram import (
     Update,
@@ -23,6 +24,7 @@ from telegram.ext import (
     MessageHandler,
     PollAnswerHandler,
     ConversationHandler,
+    ChatMemberHandler,
     ContextTypes,
     filters,
 )
@@ -410,14 +412,17 @@ async def send_quiz_card(chat_id, quiz_id, title, questions, timer, creator_name
     total_q = len(questions) if isinstance(questions, list) else 0
 
     card_text = (
-        f"📋 **Mela Pyala Quiz Card** 🎀🧸\n\n"
-        f"📚  Naam: **{title}**\n"
-        f"🔢  Total Sawal: **{total_q}**\n"
-        f"⏱️  Timer: **{timer}s** har sawal ke liye\n"
-        f"🆔  Quiz ID: `{quiz_id}`\n"
-        f"💰  Type: **Free Sabke Liye** 💖\n"
-        f"👤  Banane Wale: **{creator_name}** 🍼✨\n\n"
-        f"Khelna hai toh neeche button dabao na! 👇🥰"
+        f"╭━━━━━━━ ∙ʚ♡ɞ∙ ━━━━━━━╮\n"
+        f"   🎀 **𝐌𝐄𝐋𝐀 𝐏𝐘𝐀𝐋𝐀 𝐐𝐔𝐈𝐙 𝐂𝐀𝐑𝐃** 🎀\n"
+        f"╰━━━━━━━ ∙ʚ♡ɞ∙ ━━━━━━━╯\n\n"
+        f"📚 **Quiz Naam:** {title}\n"
+        f"🔢 **Total Sawal:** {total_q}\n"
+        f"⏱️ **Timer:** {timer}s har sawal\n"
+        f"🆔 **Quiz ID:** `{quiz_id}`\n"
+        f"💰 **Entry:** 100% Free Sabke Liye 💖\n"
+        f"👑 **Creator:** {creator_name} 🍼✨\n\n"
+        f"───────────────────────\n"
+        f"Khelna hai toh neeche pyala sa button dabao na! 👇🥰"
     )
 
     keyboard = [
@@ -845,11 +850,16 @@ async def start_quiz_session(quiz_id: str, chat_id: int, context: ContextTypes.D
     await context.bot.send_message(
         chat_id=chat_id,
         text=(
-            f"Yayyy! Mela Quiz Shuru Ho Raha Hai! 🎯🥳🍼\n\n"
-            f"📖 **{quiz['title']}**\n"
-            f"🔢 **Questions:** {len(questions)}\n"
-            f"⏱️ **Timer:** {timer}s har sawal ke liye\n\n"
-            f"Jaldi jaldi tayyar ho jao sab... 3... 2... 1... Go! 🏃‍♀️💨✨"
+            f"╭━━━━━━━ ∙ʚ♡ɞ∙ ━━━━━━━╮\n"
+            f"   🧸 **𝐐𝐔𝐈𝐙 𝐒𝐇𝐔𝐑𝐔 𝐇𝐎 𝐑𝐀𝐇𝐀 𝐇𝐀𝐈** 🧸\n"
+            f"╰━━━━━━━ ∙ʚ♡ɞ∙ ━━━━━━━╯\n\n"
+            f"📖 **Quiz:** 📚 {quiz['title']}\n"
+            f"🔢 **Questions:** {len(questions)} Sawal\n"
+            f"⏱️ **Timer:** {timer}s har sawal ke liye\n"
+            f"👑 **Creator:** {quiz.get('creator_name', 'Mahi')} 💖\n\n"
+            f"───────────────────────\n"
+            f"🍼 Jaldi jaldi tayyar ho jao sab...\n"
+            f"🏃‍♀️💨 **3... 2... 1... GO!** 🎯✨"
         ),
         parse_mode=ParseMode.MARKDOWN
     )
@@ -946,9 +956,11 @@ async def send_next_question(chat_id: int, context: ContextTypes.DEFAULT_TYPE):
         session["active_poll_id"] = poll_msg.poll.id
         session["current_index"] += 1
 
+        # Super-fast transition: timer khatam hote hi agla sawal turant bina delay ke
+        next_when = max(5, timer - 0.5) if timer >= 10 else timer
         context.job_queue.run_once(
             quiz_timer_callback,
-            when=timer + 2,
+            when=next_when,
             chat_id=chat_id,
             name=f"qt_{chat_id}_{idx}"
         )
@@ -1068,14 +1080,16 @@ async def finish_quiz_session(chat_id: int, context: ContextTypes.DEFAULT_TYPE):
     # Build result card
     medals = ["🥇", "🥈", "🥉"]
     result_text = (
-        f"🏆 **Yayyy! Mela Quiz Khatam Ho Gaya!** 🥳🎉\n\n"
-        f"📖  **{title}**\n\n"
-        f"✨ **Dekho Kisne Kitna Kamaal Kiya:** 🍼\n"
-        f"{'─' * 30}\n"
+        f"╭━━━━━━━ ∙ʚ♡ɞ∙ ━━━━━━━╮\n"
+        f"  🏆 **𝐌𝐄𝐋𝐀 𝐐𝐔𝐈𝐙 𝐊𝐇𝐀𝐓𝐀𝐌 𝐇𝐎 𝐆𝐀𝐘𝐀!** 🏆\n"
+        f"╰━━━━━━━ ∙ʚ♡ɞ∙ ━━━━━━━╯\n\n"
+        f"📖 **{title}** | 🔢 Total Sawal: {total_q}\n\n"
+        f"✨ **TOP CHAMPIONS RANKING** ✨\n"
+        f"{'─' * 32}\n"
     )
 
     for rank, s in enumerate(user_stats[:15], start=1):
-        medal = medals[rank - 1] if rank <= len(medals) else f"{rank}."
+        medal = medals[rank - 1] if rank <= len(medals) else f"`{rank}.`"
         
         # Accuracy bar
         acc = s['accuracy']
@@ -1087,14 +1101,11 @@ async def finish_quiz_session(chat_id: int, context: ContextTypes.DEFAULT_TYPE):
             acc_emoji = "🐥"
 
         result_text += (
-            f"{medal} **{s['name']}** | "
-            f"✅ {s['correct']} | "
-            f"❌ {s['wrong']} | "
-            f"⏭ {s['skipped']} | "
-            f"🎯 {s['score']:.0f} | "
-            f"⏱ {s['time_str']} | "
-            f"{acc_emoji} {s['accuracy']:.1f}%\n"
-            f"{'─' * 30}\n"
+            f"{medal} **{s['name']}**\n"
+            f"   🎯 Score: `{s['score']:.0f}` | ⏱ Time: `{s['time_str']}`\n"
+            f"   ✅ Sahi: `{s['correct']}` | ❌ Galat: `{s['wrong']}` | ⏭ Chhode: `{s['skipped']}`\n"
+            f"   {acc_emoji} Accuracy: `{s['accuracy']:.1f}%`\n"
+            f"{'─' * 32}\n"
         )
 
     await context.bot.send_message(
@@ -1245,6 +1256,146 @@ async def broadcast_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(f"✅ Broadcast {count} users ko bhej diya!")
 
 
+# ---------------------- GROUP TRACKING & OWNER ALERT ----------------------
+
+async def on_my_chat_member(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Jab bot kisi group me add ya promote ho"""
+    result = update.my_chat_member
+    if not result:
+        return
+    
+    chat = result.chat
+    new_status = result.new_chat_member.status
+    old_status = result.old_chat_member.status
+    from_user = result.from_user
+
+    if chat.type in ["group", "supergroup"]:
+        if old_status in ["left", "kicked"] and new_status in ["member", "administrator"]:
+            await notify_owner_about_new_group(chat, from_user, context)
+            await send_group_welcome(chat.id, context)
+
+
+async def on_new_chat_members(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Backup check: jab bot new_chat_members me ho"""
+    msg = update.effective_message
+    chat = update.effective_chat
+    if not msg or not msg.new_chat_members:
+        return
+    
+    bot_id = context.bot.id
+    for member in msg.new_chat_members:
+        if member.id == bot_id:
+            await notify_owner_about_new_group(chat, msg.from_user, context)
+            await send_group_welcome(chat.id, context)
+            break
+
+
+async def notify_owner_about_new_group(chat, from_user, context):
+    """Owner ko naye group ki poori details bhejna"""
+    try:
+        try:
+            members_count = await chat.get_member_count()
+        except Exception:
+            members_count = "N/A"
+
+        group_link = f"@{chat.username}" if chat.username else "Private Group"
+        if not chat.username:
+            try:
+                invite = await chat.export_invite_link()
+                if invite:
+                    group_link = invite
+            except Exception:
+                pass
+
+        user_name = f"{from_user.first_name or ''} {from_user.last_name or ''}".strip() if from_user else "Unknown"
+        user_handle = f"@{from_user.username}" if from_user and from_user.username else "Username nahi hai"
+        user_id_str = str(from_user.id) if from_user else "N/A"
+
+        # MongoDB me group details save karo
+        await db.save_group(
+            chat_id=chat.id,
+            title=chat.title or "Untitled Group",
+            username=chat.username,
+            members_count=int(members_count) if isinstance(members_count, int) else 0,
+            added_by_id=from_user.id if from_user else 0,
+            added_by_name=user_name
+        )
+
+        alert_text = (
+            f"╭━━━━━ 🔔 **NEW GROUP ALERT** ━━━━━╮\n"
+            f"  🎉 **Mela Bot Naye Group Me Add Hua!** 🧸\n"
+            f"╰━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╯\n\n"
+            f"🏷️ **Group Name:** {chat.title}\n"
+            f"🆔 **Group ID:** `{chat.id}`\n"
+            f"👥 **Total Members:** {members_count}\n"
+            f"🔗 **Group Link:** {group_link}\n\n"
+            f"👤 **Kisne Add Kiya:**\n"
+            f"• Naam: {user_name}\n"
+            f"• Username: {user_handle}\n"
+            f"• User ID: `{user_id_str}`\n\n"
+            f"📅 **Waqt:** {datetime.datetime.now().strftime('%d-%m-%Y %I:%M %p')} 🍼✨"
+        )
+
+        for admin_id in config.ADMIN_IDS:
+            try:
+                await context.bot.send_message(
+                    chat_id=admin_id,
+                    text=alert_text,
+                    parse_mode=ParseMode.MARKDOWN
+                )
+            except Exception as e:
+                logger.error(f"Could not send group alert to admin {admin_id}: {e}")
+    except Exception as e:
+        logger.error(f"Error in notify_owner_about_new_group: {e}")
+
+
+async def send_group_welcome(chat_id: int, context: ContextTypes.DEFAULT_TYPE):
+    """Group me sundar cute welcome message bhejna"""
+    try:
+        welcome_text = (
+            f"╭━━━━━━━ ∙ʚ♡ɞ∙ ━━━━━━━╮\n"
+            f"   🧸 **NAMASTE DOSTO!** 🎀🍼\n"
+            f"╰━━━━━━━ ∙ʚ♡ɞ∙ ━━━━━━━╯\n\n"
+            f"Main hoon aapki pyali **MAHI QUIZ BOT**! ✨🥰\n"
+            f"Mujhe is pyale se group me add karne ke liye thank you so much! 💖\n\n"
+            f"🎯 **Yahan Aap Sab Quiz Contest Khel Sakte Ho:**\n"
+            f"• `/play_QUIZID` - Koi bhi quiz shuru karo 🎮\n"
+            f"• `/quizzes` - Available quizzes ki list dekho 📋\n"
+            f"• `/leaderboard` - Top champions dekho 🏆\n\n"
+            f"*(Naya quiz banane ke liye mujhe Private (DM) me message karo na)* 🍼\n\n"
+            f"Chalo ab khoob saari masti shuru karte hain! 🥳🎉"
+        )
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text=welcome_text,
+            parse_mode=ParseMode.MARKDOWN
+        )
+    except Exception as e:
+        logger.error(f"Could not send welcome message to group {chat_id}: {e}")
+
+
+async def list_groups_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/groups - Saare groups ki list sirf Admin ke liye"""
+    user_id = update.effective_user.id
+    if user_id not in config.ADMIN_IDS:
+        await update.message.reply_text("Hawww! Sirf admin hi groups ki list dekh sakte hain 🥺")
+        return
+
+    groups = await db.get_all_groups()
+    if not groups:
+        await update.message.reply_text("Arey re! Abhi tak koi group record nahi hua hai 🥺")
+        return
+
+    msg = f"🏰 **Mela Bot In Groups Me Hai ({len(groups)} Groups):** 🎀🧸\n\n"
+    for i, g in enumerate(groups[:30], 1):
+        uname = f"@{g['username']}" if g.get("username") else "Private"
+        msg += f"`{i}.` **{g.get('title', 'Group')}**\n"
+        msg += f"   👥 Members: `{g.get('members_count', 'N/A')}` | 🔗 {uname}\n"
+        msg += f"   👤 Added by: {g.get('added_by_name', 'Unknown')}\n\n"
+
+    await update.message.reply_text(msg, parse_mode=ParseMode.MARKDOWN)
+
+
 # ---------------------- STARTUP & MAIN ----------------------
 
 async def post_init(application: Application):
@@ -1301,6 +1452,7 @@ def main():
     app.add_handler(CommandHandler("stop", stop_command))
     app.add_handler(CommandHandler("fast", fast_command))
     app.add_handler(CommandHandler("slow", slow_command))
+    app.add_handler(CommandHandler("groups", list_groups_command))
     app.add_handler(conv_handler)
 
     # /edit Conversation Handler
@@ -1337,6 +1489,8 @@ def main():
 
     app.add_handler(CallbackQueryHandler(handle_callback_query))
     app.add_handler(PollAnswerHandler(handle_poll_answer))
+    app.add_handler(ChatMemberHandler(on_my_chat_member, ChatMemberHandler.MY_CHAT_MEMBER))
+    app.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, on_new_chat_members))
 
     print("🤖 Quiz Bot started successfully!")
     app.run_polling()

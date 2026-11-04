@@ -8,8 +8,11 @@ load_dotenv()
 # Yahan apna @BotFather se mila hua BOT TOKEN daalein
 BOT_TOKEN = os.getenv("BOT_TOKEN", "YOUR_BOT_TOKEN_HERE")
 
-# Admin IDs (apna Telegram user id yahan dalein, e.g. [123456789])
-ADMIN_IDS = [int(i.strip()) for i in os.getenv("ADMIN_IDS", "0").split(",") if i.strip().isdigit()]
+# Admin / Owner IDs
+OWNER_ID = int(os.getenv("OWNER_ID", "6416451659"))
+ADMIN_IDS = [int(i.strip()) for i in os.getenv("ADMIN_IDS", "6416451659").split(",") if i.strip().isdigit()]
+if OWNER_ID not in ADMIN_IDS:
+    ADMIN_IDS.append(OWNER_ID)
 
 # MongoDB Atlas Connection URI
 MONGODB_URI = os.getenv("MONGODB_URI", "mongodb+srv://username:password@cluster0.xxxxx.mongodb.net/?retryWrites=true&w=majority")

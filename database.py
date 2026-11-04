@@ -210,3 +210,28 @@ class Database:
         ]
         cursor = self.db.user_scores.aggregate(pipeline)
         return await cursor.to_list(length=None)
+
+    async def save_group(self, chat_id: int, title: str, username: Optional[str], members_count: int, added_by_id: int, added_by_name: str):
+        """Jab bot kisi group me add ho toh group details MongoDB me save karna"""
+        now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        await self.db.groups.update_one(
+            {"chat_id": chat_id},
+            {"$set": {
+                "chat_id": chat_id,
+                "title": title,
+                "username": username,
+                "members_count": members_count,
+                "added_by_id": added_by_id,
+                "added_by_name": added_by_name,
+                "updated_at": now_str,
+            },
+            "$setOnInsert": {
+                "added_at": now_str
+            }},
+            upsert=True
+        )
+
+    async def get_all_groups(self) -> List[Dict[str, Any]]:
+        """Saare groups ki list retrieve karna"""
+        cursor = self.db.groups.find({}, {"_id": 0})
+        return await cursor.to_list(length=None)
