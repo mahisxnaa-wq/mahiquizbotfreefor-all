@@ -2,6 +2,7 @@ import logging
 import asyncio
 import io
 import os
+import time
 import threading
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from typing import Dict, Any
@@ -483,7 +484,11 @@ async def start_quiz_session(quiz_id: str, chat_id: int, context: ContextTypes.D
         "timer": timer,
         "questions": questions,
         "current_index": 0,
-        "scores": {},
+        "scores": {},           # user_id -> correct count
+        "wrong": {},            # user_id -> wrong count
+        "user_names": {},       # user_id -> first_name
+        "start_time": {},       # user_id -> first answer timestamp
+        "last_answer_time": {}, # user_id -> last answer timestamp
         "active_poll_id": None,
     }
 
@@ -524,8 +529,15 @@ async def send_next_question(chat_id: int, context: ContextTypes.DEFAULT_TYPE):
     explanation = q.get("explanation", "")
 
     # Native Telegram Quiz Poll only (no image card)
-    poll_question = f"Q{idx+1}: {q_text[:250]}"
-    poll_options = options[:10]
+    total_q = len(questions)
+    poll_question = f"[{idx+1}/{total_q}] {q_text[:240]}"
+    
+    # A), B), C), D) prefix add karna
+    option_labels = ["A", "B", "C", "D", "E", "F", "G", "H", "I", "J"]
+    poll_options = []
+    for i, opt in enumerate(options[:10]):
+        label = option_labels[i] if i < len(option_labels) else str(i+1)
+        poll_options.append(f"{label}) {opt}"[:100])  # Telegram 100 char limit
 
     # Ensure at least 2 options
     if len(poll_options) < 2:
@@ -562,6 +574,7 @@ async def handle_poll_answer(update: Update, context: ContextTypes.DEFAULT_TYPE)
     answer = update.poll_answer
     user = answer.user
     selected_option = answer.option_ids[0] if answer.option_ids else None
+    now = time.time()
 
     for chat_id, session in active_sessions.items():
         if session.get("active_poll_id") == answer.poll_id:
@@ -569,9 +582,21 @@ async def handle_poll_answer(update: Update, context: ContextTypes.DEFAULT_TYPE)
             if 0 <= curr_idx < len(session["questions"]):
                 q = session["questions"][curr_idx]
                 correct_idx = q.get("correct_option_id") if "correct_option_id" in q else q.get("correct_option_index", 0)
+                
+                # User name save karo
+                session["user_names"][user.id] = user.first_name or user.username or "User"
+                
+                # First answer time track karo
+                if user.id not in session["start_time"]:
+                    session["start_time"][user.id] = now
+                session["last_answer_time"][user.id] = now
+                
                 if selected_option == correct_idx:
                     session["scores"][user.id] = session["scores"].get(user.id, 0) + 1
-                    await db.register_user(user.id, user.username, user.first_name)
+                else:
+                    session["wrong"][user.id] = session["wrong"].get(user.id, 0) + 1
+                
+                await db.register_user(user.id, user.username, user.first_name)
             break
 
 
@@ -581,24 +606,103 @@ async def finish_quiz_session(chat_id: int, context: ContextTypes.DEFAULT_TYPE):
         return
 
     scores = session["scores"]
+    wrong = session["wrong"]
+    user_names = session["user_names"]
+    start_times = session["start_time"]
+    last_times = session["last_answer_time"]
     quiz_id = session["quiz_id"]
     total_q = len(session["questions"])
+    title = session["title"]
 
+    # Save scores to DB
     for uid, sc in scores.items():
         await db.record_score(quiz_id, chat_id, uid, sc, total_q)
 
-    sorted_scores = sorted(scores.items(), key=lambda x: x[1], reverse=True)
+    # All users who participated
+    all_users = set(list(scores.keys()) + list(wrong.keys()))
 
-    result_text = f"🏁 **Quiz Complete!**\n\n📖 **{session['title']}**\n\n🏆 **Results:**\n"
-    if not sorted_scores:
-        result_text += "Kisi ne bhi answer nahi diya."
-    else:
-        medals = ["🥇", "🥈", "🥉", "🎖️", "🎖️"]
-        for rank, (uid, sc) in enumerate(sorted_scores[:10], start=1):
-            medal = medals[rank - 1] if rank <= len(medals) else "🔹"
-            result_text += f"{medal} **Rank {rank}:** `{sc}/{total_q}` Sahi\n"
+    if not all_users:
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text=f"🏁 **Quiz Completed!**\n\n📖 {title}\n\nKisi ne bhi answer nahi diya.",
+            parse_mode=ParseMode.MARKDOWN
+        )
+        return
 
-    await context.bot.send_message(chat_id=chat_id, text=result_text, parse_mode=ParseMode.MARKDOWN)
+    # Build detailed stats per user
+    user_stats = []
+    for uid in all_users:
+        correct = scores.get(uid, 0)
+        wr = wrong.get(uid, 0)
+        attempted = correct + wr
+        skipped = total_q - attempted
+        score_val = float(correct)  # Can add negative marking here
+        name = user_names.get(uid, "User")
+        
+        # Time calculation
+        if uid in start_times and uid in last_times:
+            elapsed = last_times[uid] - start_times[uid]
+            mins = int(elapsed // 60)
+            secs = int(elapsed % 60)
+            time_str = f"{mins}m {secs}s"
+        else:
+            time_str = "N/A"
+            elapsed = 99999
+        
+        accuracy = (correct / total_q * 100) if total_q > 0 else 0
+
+        user_stats.append({
+            "uid": uid,
+            "name": name,
+            "correct": correct,
+            "wrong": wr,
+            "skipped": skipped,
+            "score": score_val,
+            "time_str": time_str,
+            "elapsed": elapsed,
+            "accuracy": accuracy,
+        })
+
+    # Sort by score (desc), then by time (asc)
+    user_stats.sort(key=lambda x: (-x["score"], x["elapsed"]))
+
+    # Build result card
+    medals = ["🥇", "🥈", "🥉"]
+    result_text = (
+        f"🏁 **Quiz Completed!**\n\n"
+        f"📖  {title}\n\n"
+        f"🎯 **Top Performers:**\n"
+        f"{'─' * 30}\n"
+    )
+
+    for rank, s in enumerate(user_stats[:15], start=1):
+        medal = medals[rank - 1] if rank <= len(medals) else f"{rank}."
+        
+        # Accuracy bar
+        acc = s['accuracy']
+        if acc >= 80:
+            acc_emoji = "📊"
+        elif acc >= 50:
+            acc_emoji = "📈"
+        else:
+            acc_emoji = "📉"
+
+        result_text += (
+            f"{medal} **{s['name']}** | "
+            f"✅ {s['correct']} | "
+            f"❌ {s['wrong']} | "
+            f"⏭ {s['skipped']} | "
+            f"🎯 {s['score']:.0f} | "
+            f"⏱ {s['time_str']} | "
+            f"{acc_emoji} {s['accuracy']:.1f}%\n"
+            f"{'─' * 30}\n"
+        )
+
+    await context.bot.send_message(
+        chat_id=chat_id,
+        text=result_text,
+        parse_mode=ParseMode.MARKDOWN
+    )
 
 
 # ---------------------- LEADERBOARD & ADMIN ----------------------
