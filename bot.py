@@ -856,58 +856,80 @@ async def start_quiz_session(quiz_id: str, chat_id: int, context: ContextTypes.D
 
 
 async def send_next_question(chat_id: int, context: ContextTypes.DEFAULT_TYPE):
-    session = active_sessions.get(chat_id)
-    if not session:
-        return
-
-    idx = session["current_index"]
-    questions = session["questions"]
-
-    if idx >= len(questions):
-        await finish_quiz_session(chat_id, context)
-        return
-
-    q = questions[idx]
-    timer = session["timer"]
-
-    # Get question text and options (support both field names)
-    q_text = q.get("question_text") or q.get("question", "")
-    options = list(q.get("options", []))
-    correct_idx = q.get("correct_option_id") if "correct_option_id" in q else q.get("correct_option_index", 0)
-    explanation = q.get("explanation", "")
-
-    # Clean explanation if accidentally saved inside options in older quizzes
-    filtered_options = []
-    for opt in options:
-        if is_exp_line(opt):
-            if not explanation:
-                explanation = extract_exp_text(opt)
-        else:
-            filtered_options.append(opt)
-    options = filtered_options
-
-    # Ensure correct_idx is within bounds
-    if not (0 <= correct_idx < len(options)):
-        correct_idx = 0
-
-    # Native Telegram Quiz Poll only (no image card)
-    total_q = len(questions)
-    poll_question = f"[{idx+1}/{total_q}] {q_text[:240]}"
-    
-    # A), B), C), D) prefix add karna
-    option_labels = ["A", "B", "C", "D", "E", "F", "G", "H", "I", "J"]
-    poll_options = []
-    for i, opt in enumerate(options[:10]):
-        # Strip existing A), B) if present
-        clean_opt = re.sub(r'^(?:[A-Za-z0-9][\.\)]|\([A-Za-z0-9]\))\s*', '', opt).strip()
-        label = option_labels[i] if i < len(option_labels) else str(i+1)
-        poll_options.append(f"{label}) {clean_opt}"[:100])  # Telegram 100 char limit
-
-    # Ensure at least 2 options
-    if len(poll_options) < 2:
-        poll_options = poll_options + ["(no option)"] * (2 - len(poll_options))
-
     try:
+        session = active_sessions.get(chat_id)
+        if not session:
+            return
+
+        idx = session["current_index"]
+        questions = session["questions"]
+
+        if idx >= len(questions):
+            await finish_quiz_session(chat_id, context)
+            return
+
+        q = questions[idx]
+        if isinstance(q, str):
+            try:
+                import json
+                q = json.loads(q)
+            except Exception:
+                q = {"question_text": q, "options": ["A", "B"], "correct_option_id": 0}
+
+        timer = session.get("timer", 20)
+
+        # Get question text and options
+        q_text = str(q.get("question_text") or q.get("question") or "Question")
+        raw_options = q.get("options", [])
+        if isinstance(raw_options, str):
+            try:
+                import json
+                raw_options = json.loads(raw_options)
+            except Exception:
+                raw_options = [raw_options]
+
+        options = [str(opt) for opt in raw_options]
+
+        # Safe correct index parsing
+        raw_correct = q.get("correct_option_id")
+        if raw_correct is None:
+            raw_correct = q.get("correct_option_index", 0)
+        try:
+            correct_idx = int(raw_correct)
+        except (ValueError, TypeError):
+            correct_idx = 0
+
+        explanation = str(q.get("explanation") or "")
+
+        # Clean explanation if accidentally saved inside options in older quizzes
+        filtered_options = []
+        for opt in options:
+            if is_exp_line(opt):
+                if not explanation:
+                    explanation = extract_exp_text(opt)
+            else:
+                filtered_options.append(opt)
+        options = filtered_options
+
+        # Ensure correct_idx is within bounds
+        if not (0 <= correct_idx < len(options)):
+            correct_idx = 0
+
+        # Native Telegram Quiz Poll only (no image card)
+        total_q = len(questions)
+        poll_question = f"[{idx+1}/{total_q}] {q_text[:240]}"
+        
+        # A), B), C), D) prefix add karna
+        option_labels = ["A", "B", "C", "D", "E", "F", "G", "H", "I", "J"]
+        poll_options = []
+        for i, opt in enumerate(options[:10]):
+            clean_opt = re.sub(r'^(?:[A-Za-z0-9][\.\)]|\([A-Za-z0-9]\))\s*', '', opt).strip()
+            label = option_labels[i] if i < len(option_labels) else str(i+1)
+            poll_options.append(f"{label}) {clean_opt}"[:100])
+
+        if len(poll_options) < 2:
+            poll_options = poll_options + ["(no option)"] * (2 - len(poll_options))
+
         poll_msg = await context.bot.send_poll(
             chat_id=chat_id,
             question=poll_question,
@@ -929,7 +951,9 @@ async def send_next_question(chat_id: int, context: ContextTypes.DEFAULT_TYPE):
             name=f"qt_{chat_id}_{idx}"
         )
     except Exception as e:
-        logger.error(f"Error sending poll in chat {chat_id}: {e}")
+        import traceback
+        err_detail = traceback.format_exc()
+        logger.error(f"Error in send_next_question: {err_detail}")
         await context.bot.send_message(
             chat_id=chat_id,
             text=f"Arey re! Sawal bhejne me dikkat aa gayi 🥺:\n`{e}`\n\n*(Agar group me ho toh check karo ki bot ko **Send Polls** ki permission hai na!)*",

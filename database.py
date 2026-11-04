@@ -111,8 +111,21 @@ class Database:
         doc.pop("_id", None)
         doc["title"] = doc.get("name") or "Quiz"
         doc["timer_seconds"] = doc.get("timer") or 20
-        # questions directly array me hain, JSON parse nahi karna
-        if "questions" not in doc:
+        
+        # Support both questions array and questions_json string
+        if "questions" in doc and isinstance(doc["questions"], list):
+            pass
+        elif "questions_json" in doc:
+            try:
+                doc["questions"] = json.loads(doc["questions_json"])
+            except Exception:
+                doc["questions"] = []
+        elif "questions" in doc and isinstance(doc["questions"], str):
+            try:
+                doc["questions"] = json.loads(doc["questions"])
+            except Exception:
+                doc["questions"] = []
+        else:
             doc["questions"] = []
         return doc
 
