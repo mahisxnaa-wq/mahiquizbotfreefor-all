@@ -42,6 +42,9 @@ db = Database(config.DB_NAME)
 # States for /newquiz Conversation
 TITLE, QUESTION_PROMPT, OPTIONS_PROMPT, CORRECT_PROMPT, EXPLANATION_PROMPT, TIMER = range(6)
 
+# States for /edit Conversation
+EDIT_MENU, EDIT_NAME_INPUT, EDIT_TIMER_INPUT, EDIT_ADD_Q_INPUT, EDIT_REMOVE_Q_INPUT = range(10, 15)
+
 # In-memory tracking of active quiz sessions: chat_id -> SessionData
 active_sessions: Dict[int, Dict[str, Any]] = {}
 
@@ -79,34 +82,20 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             quiz_id = arg[5:]
             if quiz_id:
                 await start_quiz_session(quiz_id, chat_id, context)
-                return
+                return ConversationHandler.END
 
-    keyboard = [
-        [
-            InlineKeyboardButton("🎯 Play Quiz", callback_data="list_quizzes"),
-            InlineKeyboardButton("➕ Create Quiz", callback_data="create_quiz_info"),
-        ],
-        [
-            InlineKeyboardButton("🏆 Leaderboard", callback_data="show_leaderboard"),
-            InlineKeyboardButton("ℹ️ Help", callback_data="show_help"),
-        ],
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-
-    welcome_text = (
-        f"👋 **Namaste {user.first_name}!**\n\n"
-        "Main aapka **Telegram Quiz Bot** hoon! 🧠\n\n"
-        "✨ **Aap yahan kya-kya kar sakte hain:**\n"
-        "• Koi bhi user naya quiz bana sakta hai (`/newquiz`)\n"
-        "• Text ya `.txt` file bhejkar ek click me quiz import kar sakte hain\n"
-        "• Groups me quiz contest chala sakte hain\n"
-        "• Real-time leaderboard dekh sakte hain\n\n"
-        "Neeche diye gaye buttons se shuru karein 👇"
-    )
+    # Seedha quiz creation shuru karo
+    context.user_data.clear()
+    context.user_data["questions"] = []
 
     await update.message.reply_text(
-        welcome_text, parse_mode=ParseMode.MARKDOWN, reply_markup=reply_markup
+        "📝 **Naya Quiz Banayein!**\n\n"
+        "Apne **Quiz ka Title/Naam** bhejiye:\n"
+        "(Jaise: *General Knowledge Test* ya *Class 10 Science*)\n\n"
+        "Cancel karne ke liye `/cancel` likhein.",
+        parse_mode=ParseMode.MARKDOWN
     )
+    return TITLE
 
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -406,6 +395,349 @@ async def send_quiz_card(chat_id, quiz_id, title, questions, timer, creator_name
         parse_mode=ParseMode.MARKDOWN,
         reply_markup=reply_markup
     )
+
+
+# ---------------------- QUIZ EDIT SYSTEM ----------------------
+
+async def edit_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/edit QUIZID - Quiz edit menu open karna"""
+    if not context.args or not context.args[0].strip():
+        await update.message.reply_text(
+            "Usage: `/edit QUIZ_ID`\n\nApna Quiz ID dalein jo aapko quiz card me mila tha.",
+            parse_mode=ParseMode.MARKDOWN
+        )
+        return ConversationHandler.END
+
+    quiz_id = context.args[0].strip()
+    quiz = await db.get_quiz(quiz_id)
+
+    if not quiz:
+        await update.message.reply_text("❌ Yeh Quiz ID nahi mili. Sahi ID dalein.")
+        return ConversationHandler.END
+
+    context.user_data["edit_quiz_id"] = quiz_id
+    context.user_data["edit_quiz"] = quiz
+    return await show_edit_menu(update.effective_chat.id, quiz, context)
+
+
+async def show_edit_menu(chat_id, quiz, context):
+    """Edit menu with buttons"""
+    quiz_id = quiz.get("quiz_id", "?")
+    title = quiz.get("title", "Quiz")
+    timer = quiz.get("timer_seconds", 20)
+    questions = quiz.get("questions", [])
+    total_q = len(questions)
+
+    menu_text = (
+        f"✏️ **Quiz Edit Menu**\n\n"
+        f"📌 **Name:** {title}\n"
+        f"🔢 **Questions:** {total_q}\n"
+        f"⏱️ **Timer:** {timer}s\n"
+        f"🆔 **ID:** `{quiz_id}`\n\n"
+        f"Neeche se edit option chunein:"
+    )
+
+    keyboard = [
+        [InlineKeyboardButton("📝 Edit Name", callback_data="edit_name"),
+         InlineKeyboardButton("⏱️ Edit Timer", callback_data="edit_timer")],
+        [InlineKeyboardButton("➕ Add Questions", callback_data="edit_add_q"),
+         InlineKeyboardButton("🗑️ Remove Question", callback_data="edit_remove_q")],
+        [InlineKeyboardButton("📄 Export .txt File", callback_data="edit_export_txt")],
+        [InlineKeyboardButton("✅ Done (Save & Exit)", callback_data="edit_done")],
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+
+    await context.bot.send_message(
+        chat_id=chat_id,
+        text=menu_text,
+        parse_mode=ParseMode.MARKDOWN,
+        reply_markup=reply_markup
+    )
+    return EDIT_MENU
+
+
+async def edit_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Edit menu ke buttons handle karna"""
+    query = update.callback_query
+    await query.answer()
+    data = query.data
+
+    quiz_id = context.user_data.get("edit_quiz_id")
+    if not quiz_id:
+        await query.message.reply_text("❌ Session expire ho gaya. `/edit QUIZ_ID` dobara chalayein.")
+        return ConversationHandler.END
+
+    if data == "edit_name":
+        await query.message.reply_text(
+            "📝 **Naya Quiz Name/Title bhejiye:**\n\nCancel: `/cancel`",
+            parse_mode=ParseMode.MARKDOWN
+        )
+        return EDIT_NAME_INPUT
+
+    elif data == "edit_timer":
+        await query.message.reply_text(
+            "⏱️ **Naya Timer (seconds) bhejiye:**\n(Jaise: 10, 15, 20, 30)\n\nCancel: `/cancel`",
+            parse_mode=ParseMode.MARKDOWN
+        )
+        return EDIT_TIMER_INPUT
+
+    elif data == "edit_add_q":
+        await query.message.reply_text(
+            "➕ **Naye questions bhejiye:**\n\n"
+            "Aap text paste kar sakte hain (✅ tick ya Ans: format) ya `.txt` file bhej sakte hain.\n\n"
+            "Jab ho jaye `/done` dabayein.",
+            parse_mode=ParseMode.MARKDOWN
+        )
+        context.user_data["edit_new_questions"] = []
+        return EDIT_ADD_Q_INPUT
+
+    elif data == "edit_remove_q":
+        quiz = await db.get_quiz(quiz_id)
+        questions = quiz.get("questions", [])
+        if not questions:
+            await query.message.reply_text("❌ Is quiz me koi question nahi hai.")
+            return EDIT_MENU
+
+        # Show questions list with numbers
+        q_list = ""
+        for i, q in enumerate(questions[:50], 1):
+            q_text = q.get("question_text", q.get("question", ""))[:60]
+            q_list += f"`{i}.` {q_text}...\n"
+
+        await query.message.reply_text(
+            f"🗑️ **Kaunsa question hatana hai?**\n\n"
+            f"{q_list}\n"
+            f"Question ka **number** bhejiye (jaise: `3`)\n"
+            f"Multiple hatane ke liye: `1,3,5`\n\n"
+            f"Cancel: `/cancel`",
+            parse_mode=ParseMode.MARKDOWN
+        )
+        return EDIT_REMOVE_Q_INPUT
+
+    elif data == "edit_export_txt":
+        quiz = await db.get_quiz(quiz_id)
+        questions = quiz.get("questions", [])
+        if not questions:
+            await query.message.reply_text("❌ Quiz me koi question nahi hai.")
+            return EDIT_MENU
+
+        # Generate .txt content
+        txt_content = ""
+        for i, q in enumerate(questions, 1):
+            q_text = q.get("question_text", q.get("question", ""))
+            options = q.get("options", [])
+            correct_idx = q.get("correct_option_id", q.get("correct_option_index", 0))
+            explanation = q.get("explanation", "")
+
+            txt_content += f"{q_text}\n"
+            for j, opt in enumerate(options):
+                mark = " ✅" if j == correct_idx else ""
+                txt_content += f"{opt}{mark}\n"
+            if explanation:
+                txt_content += f"Ex:- {explanation}\n"
+            txt_content += "\n"
+
+        # Send as document
+        bio = io.BytesIO(txt_content.encode("utf-8"))
+        bio.name = f"quiz_{quiz_id}.txt"
+        title = quiz.get("title", "Quiz")
+
+        await context.bot.send_document(
+            chat_id=query.message.chat_id,
+            document=bio,
+            caption=f"📄 **{title}** ({len(questions)} Questions)\nQuiz ID: `{quiz_id}`",
+            parse_mode=ParseMode.MARKDOWN
+        )
+
+        # Show menu again
+        quiz = await db.get_quiz(quiz_id)
+        context.user_data["edit_quiz"] = quiz
+        return await show_edit_menu(query.message.chat_id, quiz, context)
+
+    elif data == "edit_done":
+        quiz = await db.get_quiz(quiz_id)
+        title = quiz.get("title", "Quiz")
+        timer = quiz.get("timer_seconds", 20)
+        questions = quiz.get("questions", [])
+
+        await query.message.reply_text(
+            f"✅ **Changes Successfully Saved!**\n\n"
+            f"📌 **Name:** {title}\n"
+            f"🔢 **Questions:** {len(questions)}\n"
+            f"⏱️ **Timer:** {timer}s\n"
+            f"🆔 **ID:** `{quiz_id}`\n\n"
+            f"👉 `/play_{quiz_id}`",
+            parse_mode=ParseMode.MARKDOWN
+        )
+        context.user_data.clear()
+        return ConversationHandler.END
+
+
+async def edit_name_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Naya quiz name save karna"""
+    new_name = update.message.text.strip()
+    quiz_id = context.user_data.get("edit_quiz_id")
+
+    await db.update_quiz_title(quiz_id, new_name)
+
+    await update.message.reply_text(
+        f"✅ **Quiz ka naam change ho gaya:** {new_name}",
+        parse_mode=ParseMode.MARKDOWN
+    )
+
+    quiz = await db.get_quiz(quiz_id)
+    context.user_data["edit_quiz"] = quiz
+    return await show_edit_menu(update.effective_chat.id, quiz, context)
+
+
+async def edit_timer_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Naya timer save karna"""
+    text = update.message.text.strip()
+    quiz_id = context.user_data.get("edit_quiz_id")
+
+    if not text.isdigit() or not (5 <= int(text) <= 300):
+        await update.message.reply_text("❌ 5 se 300 ke beech number dalein:")
+        return EDIT_TIMER_INPUT
+
+    new_timer = int(text)
+    await db.update_quiz_timer(quiz_id, new_timer)
+
+    await update.message.reply_text(
+        f"✅ **Timer change ho gaya:** {new_timer}s",
+        parse_mode=ParseMode.MARKDOWN
+    )
+
+    quiz = await db.get_quiz(quiz_id)
+    context.user_data["edit_quiz"] = quiz
+    return await show_edit_menu(update.effective_chat.id, quiz, context)
+
+
+async def edit_add_q_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Edit mode me naye questions add karna (text ya file)"""
+    quiz_id = context.user_data.get("edit_quiz_id")
+    raw_text = ""
+
+    if update.message.text:
+        text = update.message.text.strip()
+        if text == "/done":
+            return await edit_add_q_done(update, context)
+        raw_text = text
+
+    parsed = parse_questions_from_text(raw_text) if raw_text else []
+
+    if parsed:
+        context.user_data.setdefault("edit_new_questions", []).extend(parsed)
+        count = len(parsed)
+        total_new = len(context.user_data["edit_new_questions"])
+        await update.message.reply_text(
+            f"✅ **{count} questions detect huye!** (Total naye: {total_new})\n\n"
+            f"Aur bhejiye ya `/done` dabayein.",
+            parse_mode=ParseMode.MARKDOWN
+        )
+    else:
+        await update.message.reply_text("❌ Koi valid question detect nahi hua. Format check karein ya `/done` dabayein.")
+
+    return EDIT_ADD_Q_INPUT
+
+
+async def edit_add_q_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Edit mode me file se questions add karna"""
+    doc = update.message.document
+    if doc.file_name and doc.file_name.lower().endswith((".txt", ".text")):
+        file = await doc.get_file()
+        byte_content = await file.download_as_bytearray()
+        raw_text = byte_content.decode("utf-8", errors="ignore")
+        parsed = parse_questions_from_text(raw_text)
+        if parsed:
+            context.user_data.setdefault("edit_new_questions", []).extend(parsed)
+            count = len(parsed)
+            total_new = len(context.user_data["edit_new_questions"])
+            await update.message.reply_text(
+                f"✅ **File se {count} questions import huye!** (Total naye: {total_new})\n\n"
+                f"Aur bhejiye ya `/done` dabayein.",
+                parse_mode=ParseMode.MARKDOWN
+            )
+        else:
+            await update.message.reply_text("❌ File me valid questions nahi mile.")
+    else:
+        await update.message.reply_text("❌ Sirf .txt file bhejiye.")
+
+    return EDIT_ADD_Q_INPUT
+
+
+async def edit_add_q_done_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/done command for adding questions in edit mode"""
+    return await edit_add_q_done(update, context)
+
+
+async def edit_add_q_done(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Naye questions quiz me merge karna"""
+    quiz_id = context.user_data.get("edit_quiz_id")
+    new_questions = context.user_data.get("edit_new_questions", [])
+
+    if not new_questions:
+        await update.message.reply_text("⚠️ Koi naya question add nahi hua.")
+    else:
+        quiz = await db.get_quiz(quiz_id)
+        existing = quiz.get("questions", [])
+        # Merge: existing + new
+        all_questions = existing + new_questions
+        await db.update_quiz_questions(quiz_id, all_questions)
+        await update.message.reply_text(
+            f"✅ **{len(new_questions)} naye questions add ho gaye!**\n"
+            f"Total ab: {len(all_questions)} questions",
+            parse_mode=ParseMode.MARKDOWN
+        )
+
+    context.user_data.pop("edit_new_questions", None)
+    quiz = await db.get_quiz(quiz_id)
+    context.user_data["edit_quiz"] = quiz
+    return await show_edit_menu(update.effective_chat.id, quiz, context)
+
+
+async def edit_remove_q_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Questions remove karna by number"""
+    text = update.message.text.strip()
+    quiz_id = context.user_data.get("edit_quiz_id")
+
+    quiz = await db.get_quiz(quiz_id)
+    questions = quiz.get("questions", [])
+    total = len(questions)
+
+    # Parse numbers: "3" ya "1,3,5" ya "2-5"
+    to_remove = set()
+    for part in text.replace(" ", "").split(","):
+        if "-" in part:
+            try:
+                start, end = part.split("-", 1)
+                for n in range(int(start), int(end) + 1):
+                    if 1 <= n <= total:
+                        to_remove.add(n - 1)
+            except ValueError:
+                pass
+        elif part.isdigit():
+            n = int(part)
+            if 1 <= n <= total:
+                to_remove.add(n - 1)
+
+    if not to_remove:
+        await update.message.reply_text("❌ Valid number nahi mila. Dobara try karein ya `/cancel`.")
+        return EDIT_REMOVE_Q_INPUT
+
+    # Remove questions (reverse order to maintain indices)
+    new_questions = [q for i, q in enumerate(questions) if i not in to_remove]
+    await db.update_quiz_questions(quiz_id, new_questions)
+
+    removed_count = len(to_remove)
+    await update.message.reply_text(
+        f"✅ **{removed_count} question(s) hata diye gaye!**\n"
+        f"Ab total: {len(new_questions)} questions",
+        parse_mode=ParseMode.MARKDOWN
+    )
+
+    quiz = await db.get_quiz(quiz_id)
+    context.user_data["edit_quiz"] = quiz
+    return await show_edit_menu(update.effective_chat.id, quiz, context)
 
 
 # ---------------------- PLAY QUIZ / LIVE ENGINE ----------------------
@@ -873,7 +1205,10 @@ def main():
 
     # /newquiz Conversation Handler
     conv_handler = ConversationHandler(
-        entry_points=[CommandHandler("newquiz", newquiz_start)],
+        entry_points=[
+            CommandHandler("newquiz", newquiz_start),
+            CommandHandler("start", start_command),
+        ],
         states={
             TITLE: [MessageHandler(filters.TEXT & ~filters.COMMAND, newquiz_title)],
             QUESTION_PROMPT: [
@@ -892,7 +1227,6 @@ def main():
         fallbacks=[CommandHandler("cancel", cancel_conversation)],
     )
 
-    app.add_handler(CommandHandler("start", start_command))
     app.add_handler(CommandHandler("help", help_command))
     app.add_handler(CommandHandler("quizzes", list_quizzes_command))
     app.add_handler(CommandHandler("leaderboard", leaderboard_command))
@@ -901,6 +1235,32 @@ def main():
     app.add_handler(CommandHandler("fast", fast_command))
     app.add_handler(CommandHandler("slow", slow_command))
     app.add_handler(conv_handler)
+
+    # /edit Conversation Handler
+    edit_conv_handler = ConversationHandler(
+        entry_points=[CommandHandler("edit", edit_command)],
+        states={
+            EDIT_MENU: [
+                CallbackQueryHandler(edit_menu_callback, pattern="^edit_"),
+            ],
+            EDIT_NAME_INPUT: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, edit_name_input),
+            ],
+            EDIT_TIMER_INPUT: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, edit_timer_input),
+            ],
+            EDIT_ADD_Q_INPUT: [
+                CommandHandler("done", edit_add_q_done_cmd),
+                MessageHandler(filters.Document.ALL, edit_add_q_file),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, edit_add_q_text),
+            ],
+            EDIT_REMOVE_Q_INPUT: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, edit_remove_q_input),
+            ],
+        },
+        fallbacks=[CommandHandler("cancel", cancel_conversation)],
+    )
+    app.add_handler(edit_conv_handler)
 
     # /play_QUIZID
     app.add_handler(MessageHandler(filters.Regex(r"^/play_"), play_command))
