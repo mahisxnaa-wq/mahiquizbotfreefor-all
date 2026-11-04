@@ -161,6 +161,35 @@ class Database:
             """, (quiz_id, chat_id, user_id, score, total))
             await db.commit()
 
+    async def update_quiz_title(self, quiz_id: str, new_title: str):
+        """Quiz ka title/naam update karna"""
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute("UPDATE quizzes SET name = ? WHERE quiz_id = ?", (new_title, quiz_id))
+            await db.commit()
+
+    async def update_quiz_timer(self, quiz_id: str, new_timer: int):
+        """Quiz ka timer update karna"""
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute("UPDATE quizzes SET timer = ? WHERE quiz_id = ?", (new_timer, quiz_id))
+            await db.commit()
+
+    async def update_quiz_questions(self, quiz_id: str, questions: List[Dict[str, Any]]):
+        """Quiz ke questions update karna"""
+        formatted_questions = []
+        for q in questions:
+            formatted_questions.append({
+                "question_text": q.get("question") or q.get("question_text", ""),
+                "options": q.get("options", []),
+                "correct_option_id": q.get("correct_option_index") if "correct_option_index" in q else q.get("correct_option_id", 0),
+                "explanation": q.get("explanation", "")
+            })
+        async with aiosqlite.connect(self.db_path) as db:
+            await db.execute(
+                "UPDATE quizzes SET questions_json = ? WHERE quiz_id = ?",
+                (json.dumps(formatted_questions, ensure_ascii=False), quiz_id)
+            )
+            await db.commit()
+
     async def get_leaderboard(self, limit: int = 10) -> List[Dict[str, Any]]:
         """Global Leaderboard calculate karna"""
         async with aiosqlite.connect(self.db_path) as db:
