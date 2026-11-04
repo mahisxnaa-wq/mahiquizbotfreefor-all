@@ -2,16 +2,29 @@ import re
 from typing import List, Dict, Any
 
 CHECKMARK_PATTERNS = ["✅", "✔️", "✔", "☑️", "☑", "(sahi)", "(correct)", "[correct]", "*"]
-EXPLANATION_PREFIXES = ["ex:-", "ex:", "ex-", "exp:", "exp-", "explanation:", "vyakhya:", "व्याख्या:"]
+EXPLANATION_PREFIXES = ["ex:-", "ex:", "ex-", "ex.-", "exp:-", "exp:", "exp-", "exp.-", "explanation:", "explanation-", "vyakhya:", "व्याख्या:", "व्याख्या:-", "व्याख्या-"]
+
+def is_explanation_line(line: str) -> bool:
+    """Checks if a line is an explanation/detail, even if prefixed with an option letter like E) or number"""
+    l = line.lower().strip()
+    # Strip any leading option label like E), (E), 5., etc.
+    l_clean = re.sub(r'^(?:[a-z0-9][\.\)]|\([a-z0-9]\))\s*', '', l).strip()
+    return any(l.startswith(p) or l_clean.startswith(p) for p in EXPLANATION_PREFIXES)
+
+def extract_explanation_text(line: str) -> str:
+    """Extracts raw explanation text without option prefix or Ex:- label"""
+    cleaned = re.sub(r'^(?:[a-z0-9][\.\)]|\([a-z0-9]\))\s*', '', line.strip(), flags=re.IGNORECASE)
+    cleaned = re.sub(r'^(?:ex(?:p(?:lanation)?)?|vyakhya|व्याख्या)\s*[:=\.\-]+\s*', '', cleaned, flags=re.IGNORECASE)
+    return cleaned.strip()
 
 def clean_option_text(text: str) -> str:
-    """Removes leading numbering like 1., A), (B) and trailing checkmarks"""
+    """Removes leading numbering like 1., A), (B), E) and trailing checkmarks"""
     t = text.strip()
     # Remove checkmark symbols
     for cm in CHECKMARK_PATTERNS:
         t = t.replace(cm, "")
-    # Remove leading option prefix: A), 1), (A), A.
-    t = re.sub(r'^(?:[A-Da-d0-9][\.\)]|\([A-Da-d0-9]\))\s*', '', t)
+    # Remove leading option prefix: A), 1), (A), A., E), 5., etc.
+    t = re.sub(r'^(?:[A-Za-z0-9][\.\)]|\([A-Za-z0-9]\))\s*', '', t)
     return t.strip()
 
 def parse_questions_from_text(raw_text: str) -> List[Dict[str, Any]]:
@@ -23,6 +36,7 @@ def parse_questions_from_text(raw_text: str) -> List[Dict[str, Any]]:
         Option 2
         Option 3 ✅
         Option 4
+        Ex:- Explanation text...
 
     Format 2 (Standard Q/A format):
         Q1. Question?
@@ -57,17 +71,10 @@ def parse_questions_from_text(raw_text: str) -> List[Dict[str, Any]]:
             q_text = re.sub(r'^(?:[Qq](?:uestion)?\s*\d*[\.\:]?|\d+[\.\)])\s*', '', lines[0]).strip()
             
             # Remaining lines are options or explanation
-            for idx, line in enumerate(lines[1:]):
-                # Check if this line is an explanation (Ex:-, Exp:, etc.)
-                line_lower = line.lower().strip()
-                is_explanation = any(line_lower.startswith(prefix) for prefix in EXPLANATION_PREFIXES)
-                
-                if is_explanation:
-                    # Extract explanation text after the prefix
-                    for prefix in EXPLANATION_PREFIXES:
-                        if line_lower.startswith(prefix):
-                            explanation = line[len(prefix):].strip()
-                            break
+            for line in lines[1:]:
+                # Check if this line is an explanation (Ex:-, Exp:, E) Ex:-, etc.)
+                if is_explanation_line(line):
+                    explanation = extract_explanation_text(line)
                     continue
                 
                 is_correct = any(cm in line for cm in CHECKMARK_PATTERNS)
@@ -79,13 +86,15 @@ def parse_questions_from_text(raw_text: str) -> List[Dict[str, Any]]:
 
         else:
             # Format 2: Regex based parsing for Q/A/B/C/D / Ans: ...
-            opt_pattern = re.compile(r'^(?:[A-Da-d0-9][\.\)]|\([A-Da-d0-9]\))\s*(.+)$')
-            ans_pattern = re.compile(r'^(?:ans(?:wer)?|sahi\s*uttar|uttar)\s*[:=\-]?\s*([A-Da-d1-9])', re.IGNORECASE)
-            exp_pattern = re.compile(r'^(?:ex(?:p(?:lanation)?)?|vyakhya|व्याख्या)\s*[:=\-]+\s*(.+)$', re.IGNORECASE)
+            opt_pattern = re.compile(r'^(?:[A-Za-z0-9][\.\)]|\([A-Za-z0-9]\))\s*(.+)$')
+            ans_pattern = re.compile(r'^(?:ans(?:wer)?|sahi\s*uttar|uttar)\s*[:=\-]?\s*([A-Za-z0-9])', re.IGNORECASE)
 
             for line in lines:
+                if is_explanation_line(line):
+                    explanation = extract_explanation_text(line)
+                    continue
+
                 ans_match = ans_pattern.match(line)
-                exp_match = exp_pattern.match(line)
                 opt_match = opt_pattern.match(line)
 
                 if ans_match:
@@ -94,8 +103,6 @@ def parse_questions_from_text(raw_text: str) -> List[Dict[str, Any]]:
                         correct_idx = ord(ans_char) - ord('A')
                     elif ans_char.isdigit():
                         correct_idx = int(ans_char) - 1
-                elif exp_match:
-                    explanation = exp_match.group(1).strip()
                 elif opt_match:
                     options.append(opt_match.group(1).strip())
                 else:
