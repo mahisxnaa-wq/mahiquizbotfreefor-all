@@ -48,6 +48,18 @@ EDIT_MENU, EDIT_NAME_INPUT, EDIT_TIMER_INPUT, EDIT_ADD_Q_INPUT, EDIT_REMOVE_Q_IN
 # In-memory tracking of active quiz sessions: chat_id -> SessionData
 active_sessions: Dict[int, Dict[str, Any]] = {}
 
+EXPLANATION_PREFIXES = ["ex:-", "ex:", "ex-", "ex.-", "exp:-", "exp:", "exp-", "exp.-", "explanation:", "explanation-", "vyakhya:", "व्याख्या:", "व्याख्या:-", "व्याख्या-"]
+
+def is_exp_line(line: str) -> bool:
+    l = line.lower().strip()
+    l_clean = re.sub(r'^(?:[a-z0-9][\.\)]|\([a-z0-9]\))\s*', '', l).strip()
+    return any(l.startswith(p) or l_clean.startswith(p) for p in EXPLANATION_PREFIXES)
+
+def extract_exp_text(line: str) -> str:
+    cleaned = re.sub(r'^(?:[a-z0-9][\.\)]|\([a-z0-9]\))\s*', '', line.strip(), flags=re.IGNORECASE)
+    cleaned = re.sub(r'^(?:ex(?:p(?:lanation)?)?|vyakhya|व्याख्या)\s*[:=\.\-]+\s*', '', cleaned, flags=re.IGNORECASE)
+    return cleaned.strip()
+
 
 # ---------------------- RENDER HEALTH-CHECK SERVER ----------------------
 
@@ -72,7 +84,8 @@ def run_health_server():
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
-    chat_id = update.effective_chat.id
+    chat = update.effective_chat
+    chat_id = chat.id
     await db.register_user(user.id, user.username, user.first_name)
 
     # Deep link check: /start play_QUIZID (jab Group button se aaye)
@@ -84,15 +97,29 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await start_quiz_session(quiz_id, chat_id, context)
                 return ConversationHandler.END
 
-    # Seedha quiz creation shuru karo
+    # Agar group me /start bheja hai bina quiz ID ke
+    if chat.type != "private":
+        bot_username = (await context.bot.get_me()).username
+        keyboard = [
+            [InlineKeyboardButton("🍼 Naya Quiz Banayein (Private Me) 🎀", url=f"https://t.me/{bot_username}?start=newquiz")]
+        ]
+        await update.message.reply_text(
+            "Arey re! 🥺 Quiz creation group me nahi hota ji!\n\n"
+            "Group me hum sirf **masti se quiz khelte hain!** 🎯\n"
+            "Naya quiz banane ke liye mujhe **Private (DM) me message karo na**! 🧸💖",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+        return ConversationHandler.END
+
+    # Private chat me seedha quiz creation shuru karo
     context.user_data.clear()
     context.user_data["questions"] = []
 
     await update.message.reply_text(
-        "📝 **Naya Quiz Banayein!**\n\n"
-        "Apne **Quiz ka Title/Naam** bhejiye:\n"
-        "(Jaise: *General Knowledge Test* ya *Class 10 Science*)\n\n"
-        "Cancel karne ke liye `/cancel` likhein.",
+        "📝 **Mela Naya Pyala Quiz Banayein!** 🧸🎀\n\n"
+        "Apne pyale-pyale **Quiz ka Naam/Title** batao na:\n"
+        "(Jaise: *Mahi Ki Cutie Quiz* ya *Masti Time GK*) 🥰✨\n\n"
+        "Nahi banana toh `/cancel` bol dena, katti ho jaungi 🥺",
         parse_mode=ParseMode.MARKDOWN
     )
     return TITLE
@@ -100,29 +127,21 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     help_text = (
-        "📖 **Bot Commands Guide:**\n\n"
-        "• `/start` - Main menu dekhein\n"
-        "• `/quizzes` - Available quizzes ki list\n"
-        "• `/newquiz` - Naya quiz banayein (Sabke liye open)\n"
-        "• `/leaderboard` - Top rankers\n"
-        "• `/cancel` - Chalu process cancel karein\n\n"
-        "📝 **Bulk Questions Add Karne Ka Tarika:**\n"
-        "Direct text paste karein ya `.txt` file bhejiye:\n"
+        "📖 **Meli Pyali Help Guide Suno Na:** 🧸🎀\n\n"
+        "• `/start` ya `/newquiz` - Pyala sa naya quiz banao 🍼\n"
+        "• `/quizzes` - Saare quizzes ki list dekho 📋\n"
+        "• `/leaderboard` - Sabse aage kaun hai dekho 🏆\n"
+        "• `/edit QUIZ_ID` - Apne quiz me kuch bhi badlo ✏️\n"
+        "• `/cancel` - Chalu kaam band karna ho toh bolo 🥺\n\n"
+        "📝 **Ek Saath Saare Questions Kaise Bhejein:**\n"
+        "Seedha text paste kar do ya `.txt` file bhej do na:\n"
         "```\n"
-        "Q1. Bharat ki rajdhani kya hai?\n"
-        "A) Mumbai\n"
-        "B) Kolkata\n"
-        "C) New Delhi\n"
-        "D) Chennai\n"
-        "Ans: C\n"
-        "```\n\n"
-        "Ya ✅ tick format bhi chalega:\n"
-        "```\n"
-        "Bharat ki rajdhani?\n"
-        "Mumbai\n"
-        "Kolkata\n"
-        "New Delhi ✅\n"
-        "Chennai\n"
+        "Sawal yahan likho?\n"
+        "Option 1\n"
+        "Option 2\n"
+        "Option 3 ✅\n"
+        "Option 4\n"
+        "Ex:- Pyala sa explanation\n"
         "```"
     )
     if update.callback_query:
@@ -138,10 +157,10 @@ async def newquiz_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["questions"] = []
 
     await update.message.reply_text(
-        "📝 **Naya Quiz Banayein!**\n\n"
-        "Sabse pehle apne **Quiz ka Title/Naam** bhejiye:\n"
-        "(Jaise: *General Knowledge Test* ya *Class 10 Science*)\n\n"
-        "Cancel karne ke liye `/cancel` likhein.",
+        "📝 **Mela Naya Pyala Quiz Banayein!** 🧸🎀\n\n"
+        "Sabse pehle apne pyale se **Quiz ka Naam/Title** batao na:\n"
+        "(Jaise: *Mahi Ki Cutie Quiz* ya *Class 10 Science*) 🥰✨\n\n"
+        "Nahi banana toh `/cancel` bol dena, katti ho jaungi 🥺",
         parse_mode=ParseMode.MARKDOWN
     )
     return TITLE
@@ -152,12 +171,12 @@ async def newquiz_title(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data["title"] = title
 
     await update.message.reply_text(
-        f"✅ Title: **{title}**\n\n"
-        "Ab aap questions bhej sakte hain:\n\n"
-        "**Option 1:** Ek-ek question bhejiye (bot guide karega)\n"
-        "**Option 2:** Saare questions ek sath text me paste kar dijiye (✅ tick ya Ans: C format)\n"
-        "**Option 3:** `.txt` file bhej dijiye\n\n"
-        "*(Jab complete ho jaye toh `/done` dabayein)*",
+        f"Awwww! Kitna pyala naam hai: **{title}** 🎀💖\n\n"
+        "Ab jaldi-jaldi apne **Questions** bhejo na:\n\n"
+        "🍼 **Tarika 1:** Ek-ek sawal bhejo (main help kalungi)\n"
+        "📄 **Tarika 2:** Saare sawal ek sath paste kal do (✅ tick format me)\n"
+        "📂 **Tarika 3:** `.txt` file bhej do\n\n"
+        "*(Jab saare sawal daal do toh **`/done`** bol dena ji!)* 🐣✨",
         parse_mode=ParseMode.MARKDOWN
     )
     return QUESTION_PROMPT
@@ -175,20 +194,20 @@ async def newquiz_question(update: Update, context: ContextTypes.DEFAULT_TYPE):
         count = len(parsed)
         total = len(context.user_data["questions"])
         await update.message.reply_text(
-            f"✅ **{count} Questions detect aur add ho gaye!** (Total: {total})\n\n"
-            "Aur questions bhejiye ya `/done` dabayein.",
+            f"Waaaah! **{count} Questions** add ho gaye! 🧸🎉 (Total: {total})\n\n"
+            "Aur bhejna hai toh bhejte laho, ya phir **`/done`** bol do na! 🐥",
             parse_mode=ParseMode.MARKDOWN
         )
         return QUESTION_PROMPT
 
     context.user_data["current_question"] = text
     await update.message.reply_text(
-        "Ab is question ke **Options** bhejiye (har option nayi line me):\n\n"
-        "Example:\n"
-        "Mumbai\n"
-        "Kolkata\n"
-        "New Delhi\n"
-        "Chennai"
+        "Ab is sawal ke **Options** batao na (har option nayi line me):\n\n"
+        "Jaise aese:\n"
+        "Option 1\n"
+        "Option 2\n"
+        "Option 3\n"
+        "Option 4 🌸"
     )
     return OPTIONS_PROMPT
 
@@ -206,31 +225,31 @@ async def newquiz_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
             count = len(parsed)
             total = len(context.user_data["questions"])
             await update.message.reply_text(
-                f"✅ **File se {count} Questions import ho gaye!** (Total: {total})\n\n"
-                "Aur bhejiye ya `/done` dabayein.",
+                f"Yayyy! File se **{count} Questions** add ho gaye! 📄🎉 (Total: {total})\n\n"
+                "Aur bhejo ya phir **`/done`** bol do na! 🐥",
                 parse_mode=ParseMode.MARKDOWN
             )
             return QUESTION_PROMPT
         else:
-            await update.message.reply_text("❌ File me koi valid question detect nahi hua. Format check karein.")
+            await update.message.reply_text("Arey re! File me sawal samajh nahi aaye mujhe 🥺 Ek baar format check karo na.")
             return QUESTION_PROMPT
     else:
-        await update.message.reply_text("❌ Sirf `.txt` file bhejiye ya text paste karein.")
+        await update.message.reply_text("Gandi baat! 🥺 Sirf `.txt` file bhejo ya text paste karo na.")
         return QUESTION_PROMPT
 
 
 async def newquiz_options(update: Update, context: ContextTypes.DEFAULT_TYPE):
     raw_lines = [line.strip() for line in update.message.text.split("\n") if line.strip()]
     if len(raw_lines) < 2:
-        await update.message.reply_text("❌ Kam se kam 2 options chahiye. Dobara bhejiye:")
+        await update.message.reply_text("Arey re! Kam se kam 2 options toh do na 🥺 Dobara bhejo:")
         return OPTIONS_PROMPT
 
     context.user_data["current_options"] = raw_lines[:10]
 
     opts_display = "\n".join([f"{i+1}) {opt}" for i, opt in enumerate(context.user_data["current_options"])])
     await update.message.reply_text(
-        f"Options note ho gaye:\n{opts_display}\n\n"
-        "Inme se **Sahi Answer kaunsa number hai?** (1, 2, 3, ya 4):"
+        f"Options note kar liye maine! 🎀\n\n{opts_display}\n\n"
+        "Inme se **Sahi wala Answer kaunsa number hai?** jaldi batao na (1, 2, 3, ya 4): 🥺👉👈"
     )
     return CORRECT_PROMPT
 
@@ -238,20 +257,20 @@ async def newquiz_options(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def newquiz_correct(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip()
     if not text.isdigit():
-        await update.message.reply_text("❌ Sirf number dalein (e.g. 1, 2, 3):")
+        await update.message.reply_text("Hawww! Sirf number likho na (jaise: 1, 2, 3) 🥺:")
         return CORRECT_PROMPT
 
     correct_idx = int(text) - 1
     total_opts = len(context.user_data["current_options"])
     if not (0 <= correct_idx < total_opts):
-        await update.message.reply_text(f"❌ 1 se {total_opts} ke beech number chunein:")
+        await update.message.reply_text(f"Gandi baat! 1 se {total_opts} ke beech ka number chuno na 🥺:")
         return CORRECT_PROMPT
 
     context.user_data["current_correct"] = correct_idx
 
     await update.message.reply_text(
-        "💡 Is question ka **Explanation** dena chahte hain?\n"
-        "Agar nahi toh `/skip` likhein."
+        "💡 Is sawal ka koi **Pyala sa Explanation** dena hai kya?\n"
+        "Agar nahi dena toh `/skip` bol do na! 🍼"
     )
     return EXPLANATION_PROMPT
 
@@ -270,8 +289,8 @@ async def newquiz_explanation(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     q_count = len(context.user_data["questions"])
     await update.message.reply_text(
-        f"✅ **Question #{q_count} add ho gaya!**\n\n"
-        "Agla question bhejiye, ya `/done` dabayein.",
+        f"Yayyy! **Question #{q_count}** add ho gaya! 🧸💖\n\n"
+        "Agla sawal bhejo na, ya phir **`/done`** bol do! 🐣",
         parse_mode=ParseMode.MARKDOWN
     )
     return QUESTION_PROMPT
@@ -280,14 +299,14 @@ async def newquiz_explanation(update: Update, context: ContextTypes.DEFAULT_TYPE
 async def newquiz_finish(update: Update, context: ContextTypes.DEFAULT_TYPE):
     questions = context.user_data.get("questions", [])
     if not questions:
-        await update.message.reply_text("❌ Koi question nahi mila. Quiz cancel ho gaya.")
+        await update.message.reply_text("Hawww! Koi question hi nahi diya? Quiz cancel ho gaya 🥺💔")
         return ConversationHandler.END
 
     # Timer pucho last me
     await update.message.reply_text(
-        f"✅ **{len(questions)} Questions add ho gaye!**\n\n"
-        "Ab last me batayein — har question ke liye kitna **Timer (Seconds)** rakhna chahte hain?\n"
-        "(Recommended: 15, 20, 30, ya 45)",
+        f"Yayyy! **{len(questions)} Questions** ready ho gaye! 🥳🎉\n\n"
+        "Bas aakhli cheez bata do — har sawal ke liye kitna **Timer (Seconds)** lagau? ⏰🍼\n"
+        "(Jaise: 10, 15, 20, ya 30 seconds likh kar bhejo na)",
         parse_mode=ParseMode.MARKDOWN
     )
     return TIMER
@@ -296,7 +315,7 @@ async def newquiz_finish(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def newquiz_timer(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Timer set karke quiz save karna (last step)"""
     text = update.message.text.strip()
-    timer = int(text) if text.isdigit() and 10 <= int(text) <= 300 else config.DEFAULT_QUESTION_TIMER
+    timer = int(text) if text.isdigit() and 5 <= int(text) <= 300 else config.DEFAULT_QUESTION_TIMER
     context.user_data["timer"] = timer
 
     questions = context.user_data.get("questions", [])
@@ -319,7 +338,7 @@ async def newquiz_timer(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def cancel_conversation(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.clear()
-    await update.message.reply_text("🚫 Process cancel ho gayi.")
+    await update.message.reply_text("Hawww! Cancel kar diya? Main katti ho gayi abhi 🥺💔")
     return ConversationHandler.END
 
 
@@ -372,20 +391,20 @@ async def send_quiz_card(chat_id, quiz_id, title, questions, timer, creator_name
     total_q = len(questions) if isinstance(questions, list) else 0
 
     card_text = (
-        f"📋 **Name:** 📚 {title}\n\n"
-        f"🔢  Questions: **{total_q}**\n"
-        f"⏱️  Timer: **{timer}s**\n"
-        f"🃏  Card Mode: 🗳  1 Card (Poll Only)\n"
-        f"🆔  ID: **{quiz_id}**\n"
-        f"💰  Type: **free**\n"
-        f"🐱  -ve: **0.00**\n"
-        f"👤  Creator: **{creator_name}** 💖\n"
+        f"📋 **Mela Pyala Quiz Card** 🎀🧸\n\n"
+        f"📚  Naam: **{title}**\n"
+        f"🔢  Total Sawal: **{total_q}**\n"
+        f"⏱️  Timer: **{timer}s** har sawal ke liye\n"
+        f"🆔  Quiz ID: `{quiz_id}`\n"
+        f"💰  Type: **Free Sabke Liye** 💖\n"
+        f"👤  Banane Wale: **{creator_name}** 🍼✨\n\n"
+        f"Khelna hai toh neeche button dabao na! 👇🥰"
     )
 
     keyboard = [
-        [InlineKeyboardButton("🎯 Start ▶️", callback_data=f"sq_{quiz_id}")],
-        [InlineKeyboardButton("🚀 Group ▶️", url=f"https://t.me/{bot_username}?startgroup=play_{quiz_id}")],
-        [InlineKeyboardButton("🔗 Share", switch_inline_query=f"play_{quiz_id}")],
+        [InlineKeyboardButton("🎯 Khelna Shuru Karo ▶️", callback_data=f"sq_{quiz_id}")],
+        [InlineKeyboardButton("🚀 Group Me Khelo ▶️", url=f"https://t.me/{bot_username}?startgroup=play_{quiz_id}")],
+        [InlineKeyboardButton("🔗 Friends Ko Bhejo", switch_inline_query=f"play_{quiz_id}")],
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
 
@@ -425,26 +444,27 @@ def build_edit_menu_text(quiz, status_line=""):
     timer = quiz.get("timer_seconds", 20)
     questions = quiz.get("questions", [])
 
-    text = f"✏️ **Quiz Edit Menu**\n\n"
+    text = f"✏️ **Mela Quiz Edit Menu** 🎀🧸\n\n"
     if status_line:
         text += f"{status_line}\n\n"
     text += (
-        f"📌 **Name:** {title}\n"
-        f"🔢 **Questions:** {len(questions)}\n"
+        f"📌 **Naam:** {title}\n"
+        f"🔢 **Total Sawal:** {len(questions)}\n"
         f"⏱️ **Timer:** {timer}s\n"
-        f"🆔 **ID:** `{quiz_id}`"
+        f"🆔 **ID:** `{quiz_id}`\n\n"
+        f"Batao aapke liye kya badlu? 🥺👉👈"
     )
     return text
 
 
 def build_edit_keyboard():
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("📝 Edit Name", callback_data="edit_name"),
-         InlineKeyboardButton("⏱️ Edit Timer", callback_data="edit_timer")],
-        [InlineKeyboardButton("➕ Add Questions", callback_data="edit_add_q"),
-         InlineKeyboardButton("🗑️ Remove Question", callback_data="edit_remove_q")],
-        [InlineKeyboardButton("📄 Export .txt", callback_data="edit_export_txt")],
-        [InlineKeyboardButton("✅ Done", callback_data="edit_done")],
+        [InlineKeyboardButton("📝 Naam Badlo", callback_data="edit_name"),
+         InlineKeyboardButton("⏱️ Time Badlo", callback_data="edit_timer")],
+        [InlineKeyboardButton("➕ Sawal Jodo", callback_data="edit_add_q"),
+         InlineKeyboardButton("🗑️ Sawal Hatao", callback_data="edit_remove_q")],
+        [InlineKeyboardButton("📄 .txt File Lo", callback_data="edit_export_txt")],
+        [InlineKeyboardButton("✅ Done (Masti Save Karo)", callback_data="edit_done")],
     ])
 
 
@@ -559,12 +579,12 @@ async def edit_menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
         questions = quiz.get("questions", [])
 
         await query.message.edit_text(
-            f"✅ **All Changes Saved!**\n\n"
-            f"📌 **Name:** {title}\n"
+            f"Awwww! Saare changes save ho gaye ji! 💖🧸\n\n"
+            f"📌 **Naam:** {title}\n"
             f"🔢 **Questions:** {len(questions)}\n"
             f"⏱️ **Timer:** {timer}s\n"
             f"🆔 **ID:** `{quiz_id}`\n\n"
-            f"👉 `/play_{quiz_id}`",
+            f"👉 Masti shuru karo: `/play_{quiz_id}` 🥳🎉",
             parse_mode=ParseMode.MARKDOWN
         )
         context.user_data.clear()
@@ -795,11 +815,11 @@ async def start_quiz_session(quiz_id: str, chat_id: int, context: ContextTypes.D
     await context.bot.send_message(
         chat_id=chat_id,
         text=(
-            f"🚀 **Quiz Shuru Ho Raha Hai!**\n\n"
+            f"Yayyy! Mela Quiz Shuru Ho Raha Hai! 🎯🥳🍼\n\n"
             f"📖 **{quiz['title']}**\n"
             f"🔢 **Questions:** {len(questions)}\n"
-            f"⏱️ **Timer:** {timer}s per question\n\n"
-            f"Tayyar ho jaiye..."
+            f"⏱️ **Timer:** {timer}s har sawal ke liye\n\n"
+            f"Jaldi jaldi tayyar ho jao sab... 3... 2... 1... Go! 🏃‍♀️💨✨"
         ),
         parse_mode=ParseMode.MARKDOWN
     )
@@ -829,12 +849,11 @@ async def send_next_question(chat_id: int, context: ContextTypes.DEFAULT_TYPE):
     explanation = q.get("explanation", "")
 
     # Clean explanation if accidentally saved inside options in older quizzes
-    from parser import is_explanation_line, extract_explanation_text
     filtered_options = []
     for opt in options:
-        if is_explanation_line(opt):
+        if is_exp_line(opt):
             if not explanation:
-                explanation = extract_explanation_text(opt)
+                explanation = extract_exp_text(opt)
         else:
             filtered_options.append(opt)
     options = filtered_options
@@ -860,26 +879,35 @@ async def send_next_question(chat_id: int, context: ContextTypes.DEFAULT_TYPE):
     if len(poll_options) < 2:
         poll_options = poll_options + ["(no option)"] * (2 - len(poll_options))
 
-    poll_msg = await context.bot.send_poll(
-        chat_id=chat_id,
-        question=poll_question,
-        options=poll_options,
-        type=Poll.QUIZ,
-        correct_option_id=correct_idx,
-        open_period=timer,
-        is_anonymous=False,
-        explanation=explanation[:200] if explanation else None,
-    )
+    try:
+        poll_msg = await context.bot.send_poll(
+            chat_id=chat_id,
+            question=poll_question,
+            options=poll_options,
+            type=Poll.QUIZ,
+            correct_option_id=correct_idx,
+            open_period=timer,
+            is_anonymous=False,
+            explanation=explanation[:200] if explanation else None,
+        )
 
-    session["active_poll_id"] = poll_msg.poll.id
-    session["current_index"] += 1
+        session["active_poll_id"] = poll_msg.poll.id
+        session["current_index"] += 1
 
-    context.job_queue.run_once(
-        quiz_timer_callback,
-        when=timer + 2,
-        chat_id=chat_id,
-        name=f"qt_{chat_id}_{idx}"
-    )
+        context.job_queue.run_once(
+            quiz_timer_callback,
+            when=timer + 2,
+            chat_id=chat_id,
+            name=f"qt_{chat_id}_{idx}"
+        )
+    except Exception as e:
+        logger.error(f"Error sending poll in chat {chat_id}: {e}")
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text=f"Arey re! Sawal bhejne me dikkat aa gayi 🥺:\n`{e}`\n\n*(Agar group me ho toh check karo ki bot ko **Send Polls** ki permission hai na!)*",
+            parse_mode=ParseMode.MARKDOWN
+        )
+        active_sessions.pop(chat_id, None)
 
 
 async def quiz_timer_callback(context: ContextTypes.DEFAULT_TYPE):
@@ -986,9 +1014,9 @@ async def finish_quiz_session(chat_id: int, context: ContextTypes.DEFAULT_TYPE):
     # Build result card
     medals = ["🥇", "🥈", "🥉"]
     result_text = (
-        f"🏁 **Quiz Completed!**\n\n"
-        f"📖  {title}\n\n"
-        f"🎯 **Top Performers:**\n"
+        f"🏆 **Yayyy! Mela Quiz Khatam Ho Gaya!** 🥳🎉\n\n"
+        f"📖  **{title}**\n\n"
+        f"✨ **Dekho Kisne Kitna Kamaal Kiya:** 🍼\n"
         f"{'─' * 30}\n"
     )
 
@@ -998,11 +1026,11 @@ async def finish_quiz_session(chat_id: int, context: ContextTypes.DEFAULT_TYPE):
         # Accuracy bar
         acc = s['accuracy']
         if acc >= 80:
-            acc_emoji = "📊"
+            acc_emoji = "🌟"
         elif acc >= 50:
-            acc_emoji = "📈"
+            acc_emoji = "✨"
         else:
-            acc_emoji = "📉"
+            acc_emoji = "🐥"
 
         result_text += (
             f"{medal} **{s['name']}** | "
@@ -1048,14 +1076,14 @@ async def is_group_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 async def stop_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """/stop - Chalu quiz ko turant band karna (sirf admin)"""
     if not await is_group_admin(update, context):
-        await update.message.reply_text("❌ Sirf group admin hi /stop command use kar sakte hain.")
+        await update.message.reply_text("Hawww! Sirf group ke admin bhaiya/didi hi /stop bol sakte hain 🥺")
         return
 
     chat_id = update.effective_chat.id
     session = active_sessions.get(chat_id)
 
     if not session:
-        await update.message.reply_text("⚠️ Is group me koi quiz chal nahi raha hai.")
+        await update.message.reply_text("Arey re! Is group me koi quiz chal hi nahi raha hai 🥺")
         return
 
     # Cancel all scheduled timer jobs for this quiz
@@ -1064,21 +1092,21 @@ async def stop_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if job.name and job.name.startswith(f"qt_{chat_id}_"):
             job.schedule_removal()
 
-    await update.message.reply_text("🛑 **Quiz band kar diya gaya hai!**", parse_mode=ParseMode.MARKDOWN)
+    await update.message.reply_text("🛑 **Arey re! Quiz rok diya gaya! Abhi sabse katti!** 🥺", parse_mode=ParseMode.MARKDOWN)
     await finish_quiz_session(chat_id, context)
 
 
 async def fast_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """/fast 10 - Timer kam karna (sirf admin)"""
     if not await is_group_admin(update, context):
-        await update.message.reply_text("❌ Sirf group admin hi /fast command use kar sakte hain.")
+        await update.message.reply_text("Hawww! Sirf admin hi timer fast kar sakte hain 🥺")
         return
 
     chat_id = update.effective_chat.id
     session = active_sessions.get(chat_id)
 
     if not session:
-        await update.message.reply_text("⚠️ Koi quiz chal nahi raha hai.")
+        await update.message.reply_text("Arey re! Koi quiz chal hi nahi raha hai 🥺")
         return
 
     # Parse seconds from command
@@ -1090,7 +1118,7 @@ async def fast_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     session["timer"] = new_timer
     await update.message.reply_text(
-        f"⚡ **Timer fast kar diya!** Ab har question ka timer: **{new_timer}s**",
+        f"⚡ **Hehe! Timer fast-fast kar diya!** 🏎️💨\nAb har sawal ka timer: **{new_timer}s**",
         parse_mode=ParseMode.MARKDOWN
     )
 
@@ -1098,14 +1126,14 @@ async def fast_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def slow_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """/slow 30 - Timer badhaana (sirf admin)"""
     if not await is_group_admin(update, context):
-        await update.message.reply_text("❌ Sirf group admin hi /slow command use kar sakte hain.")
+        await update.message.reply_text("Hawww! Sirf admin hi timer slow kar sakte hain 🥺")
         return
 
     chat_id = update.effective_chat.id
     session = active_sessions.get(chat_id)
 
     if not session:
-        await update.message.reply_text("⚠️ Koi quiz chal nahi raha hai.")
+        await update.message.reply_text("Arey re! Koi quiz chal hi nahi raha hai 🥺")
         return
 
     new_timer = config.DEFAULT_QUESTION_TIMER
@@ -1116,7 +1144,7 @@ async def slow_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     session["timer"] = new_timer
     await update.message.reply_text(
-        f"🐢 **Timer slow kar diya!** Ab har question ka timer: **{new_timer}s**",
+        f"🐢 **Aaram-aaram se khelo ab!** 🍼\nTimer slow kar diya: **{new_timer}s**",
         parse_mode=ParseMode.MARKDOWN
     )
 
