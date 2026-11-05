@@ -36,6 +36,8 @@ class Database:
             await self.db.quizzes.create_index("quiz_id", unique=True)
             await self.db.quizzes.create_index("created_at")
             await self.db.user_scores.create_index([("quiz_id", 1), ("user_id", 1)])
+            await self.db.quiz_plays.create_index("quiz_id")
+            await self.db.quiz_plays.create_index("played_at")
         except Exception as e:
             logger.error(f"❌ MongoDB connection error: {e}")
             logger.info("MongoDB retry mode me chal raha hai, bot crash nahi hoga.")
@@ -235,3 +237,124 @@ class Database:
         """Saare groups ki list retrieve karna"""
         cursor = self.db.groups.find({}, {"_id": 0})
         return await cursor.to_list(length=None)
+
+    async def get_all_group_ids(self) -> List[int]:
+        """Saare unique group IDs nikalna (groups collection + user_scores dono se)"""
+        group_ids = set()
+        try:
+            cursor = self.db.groups.find({}, {"chat_id": 1, "_id": 0})
+            async for doc in cursor:
+                cid = doc.get("chat_id")
+                if cid:
+                    group_ids.add(int(cid))
+        except Exception:
+            pass
+
+        try:
+            scores_groups = await self.db.user_scores.distinct("chat_id", {"chat_id": {"$lt": 0}})
+            for cid in scores_groups:
+                if cid:
+                    group_ids.add(int(cid))
+        except Exception:
+            pass
+
+        return list(group_ids)
+
+    async def get_user_quiz_count(self, user_id: int) -> int:
+        """User ne ab tak kitne quizzes banaye hain count karna"""
+        try:
+            return await self.db.quizzes.count_documents({"user_id": user_id})
+        except Exception as e:
+            logger.error(f"Error getting user quiz count: {e}")
+            return 0
+
+    async def get_total_quizzes_count(self) -> int:
+        """Bot me total kitne quizzes bane hain"""
+        try:
+            return await self.db.quizzes.count_documents({})
+        except Exception:
+            return 0
+
+    async def get_top_creators(self, limit: int = 15) -> List[Dict[str, Any]]:
+        """Top quiz creators ki ranking aur stats"""
+        try:
+            pipeline = [
+                {
+                    "$group": {
+                        "_id": "$user_id",
+                        "quiz_count": {"$sum": 1},
+                        "creator_name": {"$last": "$creator_name"},
+                        "latest_quiz_date": {"$max": "$created_at"},
+                    }
+                },
+                {"$sort": {"quiz_count": -1}},
+                {"$limit": limit}
+            ]
+            creators = await self.db.quizzes.aggregate(pipeline).to_list(length=limit)
+            for c in creators:
+                user_doc = await self.db.users.find_one({"user_id": c["_id"]})
+                if user_doc:
+                    c["username"] = user_doc.get("username")
+                    if not c.get("creator_name"):
+                        c["creator_name"] = user_doc.get("first_name", "Unknown")
+            return creators
+        except Exception as e:
+            logger.error(f"Error getting top creators: {e}")
+            return []
+
+    async def record_quiz_play(
+        self,
+        quiz_id: str,
+        quiz_title: str,
+        chat_id: int,
+        chat_title: str,
+        chat_type: str,
+        starter_id: int,
+        starter_name: str,
+        starter_username: Optional[str] = None
+    ):
+        """Jab bhi koi quiz start/play kiya jaye toh MongoDB me log karna"""
+        try:
+            now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            play_doc = {
+                "quiz_id": quiz_id,
+                "quiz_title": quiz_title,
+                "chat_id": chat_id,
+                "chat_title": chat_title,
+                "chat_type": chat_type,
+                "starter_id": starter_id,
+                "starter_name": starter_name,
+                "starter_username": starter_username,
+                "played_at": now_str
+            }
+            await self.db.quiz_plays.insert_one(play_doc)
+            await self.db.quizzes.update_one(
+                {"quiz_id": quiz_id},
+                {"$inc": {"plays_count": 1}, "$set": {"last_played_at": now_str}}
+            )
+        except Exception as e:
+            logger.error(f"Error recording quiz play: {e}")
+
+    async def get_quiz_play_count(self, quiz_id: str) -> int:
+        """Ek quiz total kitni baar khela gaya hai"""
+        try:
+            return await self.db.quiz_plays.count_documents({"quiz_id": quiz_id})
+        except Exception:
+            return 0
+
+    async def get_total_plays_count(self) -> int:
+        """Poore bot me total kitni baar quizzes khele gaye"""
+        try:
+            return await self.db.quiz_plays.count_documents({})
+        except Exception:
+            return 0
+
+    async def get_recent_quiz_plays(self, limit: int = 15) -> List[Dict[str, Any]]:
+        """Recent groups/chats jahan quiz khele/share kiye gaye"""
+        try:
+            cursor = self.db.quiz_plays.find({}, {"_id": 0}).sort("played_at", -1).limit(limit)
+            return await cursor.to_list(length=limit)
+        except Exception as e:
+            logger.error(f"Error getting recent plays: {e}")
+            return []
+
