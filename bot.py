@@ -7,6 +7,7 @@ import json
 import time
 import datetime
 import threading
+import httpx
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from typing import Dict, Any, Optional
 
@@ -68,20 +69,37 @@ def extract_exp_text(line: str) -> str:
 # ---------------------- RENDER HEALTH-CHECK SERVER ----------------------
 
 class HealthCheckHandler(BaseHTTPRequestHandler):
+    def do_HEAD(self):
+        self.send_response(200)
+        self.send_header("Content-type", "text/plain")
+        self.send_header("Content-Length", "30")
+        self.end_headers()
+
     def do_GET(self):
         self.send_response(200)
         self.send_header("Content-type", "text/plain")
+        self.send_header("Content-Length", "30")
         self.end_headers()
         self.wfile.write(b"Quiz Bot is alive and running!")
+
+    def do_POST(self):
+        self.send_response(200)
+        self.send_header("Content-type", "text/plain")
+        self.send_header("Content-Length", "2")
+        self.end_headers()
+        self.wfile.write(b"OK")
 
     def log_message(self, format, *args):
         return
 
 def run_health_server():
-    port = int(os.environ.get("PORT", 8080))
-    server = HTTPServer(("0.0.0.0", port), HealthCheckHandler)
-    logger.info(f"Health check web server started on port {port}")
-    server.serve_forever()
+    try:
+        port = int(os.environ.get("PORT", 8080))
+        server = HTTPServer(("0.0.0.0", port), HealthCheckHandler)
+        logger.info(f"Health check web server successfully started on port {port}")
+        server.serve_forever()
+    except Exception as e:
+        logger.error(f"Error starting health check server: {e}")
 
 
 # ---------------------- COMMAND HANDLERS ----------------------
@@ -99,7 +117,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if quiz_id:
             quiz = await db.get_quiz(quiz_id)
             if quiz:
-                await start_quiz_session(quiz_id, chat_id, context)
+                await start_quiz_session(quiz_id, chat_id, context, starter_user=user)
                 return ConversationHandler.END
 
     # Agar group me /start bheja hai bina quiz ID ke
@@ -350,6 +368,7 @@ async def newquiz_timer(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
     await send_quiz_card(update.effective_chat.id, quiz_id, title, questions, timer, creator_name, context)
+    await notify_owner_quiz_created(user, quiz_id, title, len(questions), timer, context)
     context.user_data.clear()
     return ConversationHandler.END
 
@@ -403,6 +422,43 @@ async def handle_text_or_document(update: Update, context: ContextTypes.DEFAULT_
     )
 
     await send_quiz_card(update.effective_chat.id, quiz_id, title, questions, config.DEFAULT_QUESTION_TIMER, user.first_name or user.username or "User", context)
+    await notify_owner_quiz_created(user, quiz_id, title, len(questions), config.DEFAULT_QUESTION_TIMER, context)
+
+
+async def notify_owner_quiz_created(user, quiz_id: str, title: str, question_count: int, timer: int, context: ContextTypes.DEFAULT_TYPE):
+    """Naya quiz create hone par Owner (Mahi 💖) ko instant alert bhejna"""
+    if not config.OWNER_ID:
+        return
+    try:
+        user_total_quizzes = await db.get_user_quiz_count(user.id)
+        uname = f"@{user.username}" if user.username else "`Koi Username Nahi`"
+        now_str = datetime.datetime.now().strftime("%d %b %Y, %I:%M %p")
+        msg = (
+            f"╭━━━━━━━ ∙ʚ♡ɞ∙ ━━━━━━━╮\n"
+            f"   🎉 **NAYA QUIZ BAN GAYA HAI!** 🎀🍼\n"
+            f"╰━━━━━━━ ∙ʚ♡ɞ∙ ━━━━━━━╯\n\n"
+            f"👑 **Banane Wala (Creator):**\n"
+            f"   • Naam: **{user.first_name or 'User'}**\n"
+            f"   • Username: {uname}\n"
+            f"   • User ID: `{user.id}`\n"
+            f"   • 📊 Total Quizzes: Is user ne ab tak **{user_total_quizzes}** quizzes banaye hain!\n\n"
+            f"📝 **Quiz Details:**\n"
+            f"   • Title: **{title}**\n"
+            f"   • Quiz ID: `{quiz_id}`\n"
+            f"   • Total Sawal: **{question_count}** Questions\n"
+            f"   • Timer: **{timer}s** har sawal ke liye\n"
+            f"   • Khelne Ka Command: `/play_{quiz_id}`\n\n"
+            f"🕒 **Time:** `{now_str}`\n"
+            f"───────────────────────\n"
+            f"Dekho mela pyala bot kitna active chal raha hai! 🥰✨"
+        )
+        await context.bot.send_message(
+            chat_id=config.OWNER_ID,
+            text=msg,
+            parse_mode=ParseMode.MARKDOWN
+        )
+    except Exception as e:
+        logger.error(f"Failed to notify owner of new quiz: {e}")
 
 
 # ---------------------- QUIZ INFO CARD ----------------------
@@ -811,7 +867,7 @@ async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TY
         await help_command(update, context)
     elif data.startswith("sq_"):
         quiz_id = data[3:]
-        await start_quiz_session(quiz_id, update.effective_chat.id, context)
+        await start_quiz_session(quiz_id, update.effective_chat.id, context, starter_user=update.effective_user)
 
 
 async def play_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -819,12 +875,12 @@ async def play_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     parts = text.split("_", 1)
     if len(parts) > 1 and parts[1].strip():
         quiz_id = parts[1].split("@")[0].strip()
-        await start_quiz_session(quiz_id, update.effective_chat.id, context)
+        await start_quiz_session(quiz_id, update.effective_chat.id, context, starter_user=update.effective_user)
     else:
         await list_quizzes_command(update, context)
 
 
-async def start_quiz_session(quiz_id: str, chat_id: int, context: ContextTypes.DEFAULT_TYPE):
+async def start_quiz_session(quiz_id: str, chat_id: int, context: ContextTypes.DEFAULT_TYPE, starter_user=None):
     quiz = await db.get_quiz(quiz_id)
 
     if not quiz or not quiz.get("questions"):
@@ -833,6 +889,66 @@ async def start_quiz_session(quiz_id: str, chat_id: int, context: ContextTypes.D
 
     questions = quiz["questions"]
     timer = quiz.get("timer_seconds", 20)
+
+    # 1. Record Quiz Play and Alert Owner
+    starter_id = starter_user.id if starter_user else 0
+    starter_name = starter_user.first_name if starter_user else "User"
+    starter_username = starter_user.username if starter_user else None
+
+    chat_title = "Private DM"
+    chat_type = "private"
+    try:
+        chat = await context.bot.get_chat(chat_id)
+        chat_title = chat.title if chat.title else (starter_name or "Private DM")
+        chat_type = chat.type
+    except Exception:
+        pass
+
+    try:
+        await db.record_quiz_play(
+            quiz_id=quiz_id,
+            quiz_title=quiz["title"],
+            chat_id=chat_id,
+            chat_title=chat_title,
+            chat_type=chat_type,
+            starter_id=starter_id,
+            starter_name=starter_name,
+            starter_username=starter_username
+        )
+    except Exception as e:
+        logger.error(f"Error recording quiz play: {e}")
+
+    if config.OWNER_ID:
+        try:
+            total_plays = await db.get_quiz_play_count(quiz_id)
+            uname_str = f"@{starter_username}" if starter_username else "`Koi Username Nahi`"
+            place_icon = "👥 Group" if chat_type in ["group", "supergroup"] else "👤 Private DM"
+            now_str = datetime.datetime.now().strftime("%d %b %Y, %I:%M %p")
+            creator_uname = f" (ID: `{quiz.get('user_id', 'N/A')}`)"
+
+            owner_alert = (
+                f"╭━━━━━━━ ∙ʚ♡ɞ∙ ━━━━━━━╮\n"
+                f"   🚀 **QUIZ PLAY / SHARE HUA!** 🎯🧸\n"
+                f"╰━━━━━━━ ∙ʚ♡ɞ∙ ━━━━━━━╯\n\n"
+                f"📚 **Quiz Title:** **{quiz['title']}**\n"
+                f"🆔 **Quiz ID:** `{quiz_id}`\n"
+                f"👑 **Creator:** {quiz.get('creator_name', 'Mahi')}{creator_uname}\n\n"
+                f"📍 **Kahan Play Hua:**\n"
+                f"   • {place_icon}: **{chat_title}**\n"
+                f"   • Chat ID: `{chat_id}`\n"
+                f"   • Started by: **{starter_name}** ({uname_str})\n\n"
+                f"🔥 **Is Quiz Ka Total Plays:** `{total_plays}` baar\n"
+                f"🕒 **Time:** `{now_str}`\n"
+                f"───────────────────────\n"
+                f"Mela bot sab jagah masti se chal raha hai! 🥳✨"
+            )
+            await context.bot.send_message(
+                chat_id=config.OWNER_ID,
+                text=owner_alert,
+                parse_mode=ParseMode.MARKDOWN
+            )
+        except Exception as e:
+            logger.error(f"Error notifying owner about quiz play: {e}")
 
     active_sessions[chat_id] = {
         "quiz_id": quiz_id,
@@ -1250,16 +1366,18 @@ async def broadcast_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg_to_send = " ".join(context.args).strip()
     if not msg_to_send:
         guide = (
-            "╭━━━━━ 📢 **OWNER BROADCAST HUB** ━━━━━╮\n"
-            f"  👑 **Mela Owner Control Panel** 🎀\n"
-            "╰━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╯\n\n"
-            "Aap 2 tarah se broadcast kar sakte ho ji:\n\n"
+            "╭━━━━━ 📢 **OWNER BROADCAST & CONTROL HUB** ━━━━━╮\n"
+            f"  👑 **Mela Owner Control Panel (MAHI 💖)** 🎀\n"
+            "╰━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╯\n\n"
+            "📢 **BROADCAST COMMANDS:**\n"
             "🏰 **1. Sirf Saare Groups Me Bhejna Ho:**\n"
-            "`/broadcastgroup Aapka pyala message yahan`\n"
-            "*(Bot jin-jin sabhi groups me add hai, sabhi me ek sath jayega)*\n\n"
+            "`/broadcastgroup Aapka pyala message yahan` (ya `/bg`)\n\n"
             "👤 **2. Sirf Private (DM) Users Ko Bhejna Ho:**\n"
-            "`/broadcastprivate Aapka pyala message yahan`\n"
-            "*(Bot ke sabhi private chat users ko ek sath jayega)*\n\n"
+            "`/broadcastprivate Aapka pyala message yahan` (ya `/bp`)\n\n"
+            "📊 **OWNER STATS & TRACKING COMMANDS:**\n"
+            "👑 `/quizstats` (ya `/creators`) - Kon kitna quiz banaya dekhne ke liye\n"
+            "📍 `/quizshares` (ya `/shares`) - Kahan kahan quiz khela/share hua dekhne ke liye\n"
+            "🏰 `/groups` - Bot jin-jin groups me add hai unki list\n\n"
             "✨ *Example:*\n"
             "`/broadcastgroup Aaj shaam 8 baje mega quiz contest hai!`"
         )
@@ -1466,10 +1584,10 @@ async def notify_owner_about_new_group(chat, from_user, context):
 
 
 async def list_groups_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """/groups - Saare groups ki list sirf Admin ke liye"""
+    """/groups - Saare groups ki list sirf Owner/Admin ke liye"""
     user_id = update.effective_user.id
-    if user_id not in config.ADMIN_IDS:
-        await update.message.reply_text("Hawww! Sirf admin hi groups ki list dekh sakte hain 🥺")
+    if not is_real_owner(user_id):
+        await update.message.reply_text("🚫 **Access Denied!**\n\nHawww! Sirf mela **Real Owner (MAHI 💖)** hi groups ki list dekh sakti hai 🥺👑", parse_mode=ParseMode.MARKDOWN)
         return
 
     groups = await db.get_all_groups()
@@ -1487,12 +1605,120 @@ async def list_groups_command(update: Update, context: ContextTypes.DEFAULT_TYPE
     await update.message.reply_text(msg, parse_mode=ParseMode.MARKDOWN)
 
 
+async def quizstats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/quizstats or /creators - Kisne kitne quiz banaye aur analytics (Owner Only)"""
+    user_id = update.effective_user.id
+    if not is_real_owner(user_id):
+        await update.message.reply_text(
+            "🚫 **Access Denied!**\n\nHawww! Yeh secret stats command sirf mela **Real Owner (MAHI 💖)** hi dekh sakti hai! 🙈🧸",
+            parse_mode=ParseMode.MARKDOWN
+        )
+        return
+
+    total_quizzes = await db.get_total_quizzes_count()
+    total_plays = await db.get_total_plays_count()
+    creators = await db.get_top_creators(limit=25)
+
+    msg = (
+        f"╭━━━━━ 📊 **QUIZ CREATORS & STATS** ━━━━━╮\n"
+        f"   👑 **Mela Owner Analytics Hub** 🎀\n"
+        f"╰━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╯\n\n"
+        f"🌟 **Total Quizzes Bane:** `{total_quizzes}` Quizzes\n"
+        f"🎯 **Total Khele Gaye (Plays):** `{total_plays}` Baar\n"
+        f"👥 **Total Active Creators:** `{len(creators)}` Creators\n\n"
+        f"🏆 **KISNE KITNE QUIZ BANAYE (Ranking):**\n"
+        f"───────────────────────\n"
+    )
+
+    if not creators:
+        msg += "Arey re! Abhi tak kisi ne koi quiz nahi banaya 🥺"
+    else:
+        for i, c in enumerate(creators, 1):
+            name = c.get("creator_name") or "User"
+            uname = f"(@{c['username']})" if c.get("username") else ""
+            count = c.get("quiz_count", 0)
+            last_date = c.get("latest_quiz_date", "N/A")
+            msg += (
+                f"`{i}.` 👤 **{name}** {uname}\n"
+                f"   • Quizzes: **{count} Banaye** 📝\n"
+                f"   • User ID: `{c['_id']}`\n"
+                f"   • Aakhiri Quiz: `{last_date}`\n\n"
+            )
+
+    msg += "───────────────────────\n"
+    msg += "💡 *Kahan kahan share hue dekhne ke liye:* `/quizshares` 🚀"
+    await update.message.reply_text(msg, parse_mode=ParseMode.MARKDOWN)
+
+
+async def quizshares_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """/quizshares or /shares - Kahan kahan quiz khela/share hua (Owner Only)"""
+    user_id = update.effective_user.id
+    if not is_real_owner(user_id):
+        await update.message.reply_text(
+            "🚫 **Access Denied!**\n\nHawww! Yeh secret command sirf mela **Real Owner (MAHI 💖)** hi dekh sakti hai! 🙈🧸",
+            parse_mode=ParseMode.MARKDOWN
+        )
+        return
+
+    recent_plays = await db.get_recent_quiz_plays(limit=20)
+
+    msg = (
+        f"╭━━━━━ 📍 **QUIZ SHARES & PLAYS** ━━━━━╮\n"
+        f"   🚀 **Kahan Kahan Quiz Khela Gaya** 🧸\n"
+        f"╰━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╯\n\n"
+        f"🔍 Sabse taza **20 jagah** jahan quiz play/share hua:\n\n"
+    )
+
+    if not recent_plays:
+        msg += "Arey re! Abhi tak koi play/share history record nahi hui 🥺"
+    else:
+        for i, p in enumerate(recent_plays, 1):
+            q_title = p.get("quiz_title", "Quiz")
+            q_id = p.get("quiz_id", "")
+            c_title = p.get("chat_title", "Chat")
+            c_type = p.get("chat_type", "chat")
+            type_icon = "👥 Group" if c_type in ["group", "supergroup"] else "👤 Private DM"
+            s_name = p.get("starter_name", "User")
+            s_uname = f"(@{p['starter_username']})" if p.get("starter_username") else ""
+            played_at = p.get("played_at", "")
+
+            msg += (
+                f"`{i}.` {type_icon}: **{c_title}**\n"
+                f"   • Quiz: **{q_title}** (`{q_id}`)\n"
+                f"   • By: {s_name} {s_uname}\n"
+                f"   • Time: `{played_at}`\n\n"
+            )
+
+    msg += "───────────────────────\n"
+    msg += "💡 *Creators ranking dekhne ke liye:* `/quizstats` 👑"
+    await update.message.reply_text(msg, parse_mode=ParseMode.MARKDOWN)
+
+
 # ---------------------- STARTUP & MAIN ----------------------
+
+async def keep_alive_ping(url: str):
+    """Render Web Service ko free-tier sleep hone se bachane ke liye background ping loop"""
+    if not url:
+        return
+    await asyncio.sleep(60)  # startup ke 1 min baad shuru
+    while True:
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                resp = await client.get(url)
+                logger.info(f"Self-ping to {url} status: {resp.status_code}")
+        except Exception as e:
+            logger.debug(f"Self-ping notice: {e}")
+        await asyncio.sleep(600)  # Har 10 minute me ping
+
 
 async def post_init(application: Application):
     """Database init on startup (Render compatible)"""
     await db.init_db()
     logger.info("Database initialized successfully.")
+    
+    # Auto self-ping background task
+    render_url = os.environ.get("RENDER_EXTERNAL_URL", "https://mahiquizbotfreefor-all.onrender.com")
+    asyncio.create_task(keep_alive_ping(render_url))
 
 
 def main():
@@ -1546,6 +1772,8 @@ def main():
     app.add_handler(CommandHandler("fast", fast_command))
     app.add_handler(CommandHandler("slow", slow_command))
     app.add_handler(CommandHandler("groups", list_groups_command))
+    app.add_handler(CommandHandler(["quizstats", "creators"], quizstats_command))
+    app.add_handler(CommandHandler(["quizshares", "shares", "plays"], quizshares_command))
     app.add_handler(conv_handler)
 
     # /edit Conversation Handler
